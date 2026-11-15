@@ -5,7 +5,7 @@ import { create, type ReactTestInstance, type ReactTestRenderer } from "react-te
 
 import type { Machine } from "../../shared/machines.ts";
 import type { AgentStatus, HerdrPane, InteractivePrompt, PaneSummaries, PaneSummary } from "../../shared/protocol.ts";
-import machinesFixture from "../../site/demo/fixtures/machines.json";
+import machinesFixture from "@shared/test-fixtures/machines.json";
 import { inboxKey, inboxOrder, type InboxFilter } from "../lib/agentInbox.ts";
 import * as api from "../lib/api.ts";
 import type { HeaderConnection } from "../lib/headerConnection.ts";

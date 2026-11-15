@@ -1,5 +1,4 @@
 import type { SshTarget } from "../shared/machines.ts";
-import { deviceCookieValue, parseCookies, tokenCookie } from "./auth.ts";
 import { validHerdrSocket } from "./herdr-discovery.ts";
 
 export function shellQuote(value: string): string { return `'${value.replaceAll("'", "'\\''")}'`; }
@@ -21,39 +20,27 @@ export function validateTarget(value: unknown): SshTarget {
   return { destination: v.destination, ...(v.port === undefined ? {} : { port: Number(v.port) }), ...(v.identity_file ? { identity_file: String(v.identity_file) } : {}), ...(v.session ? { session: String(v.session) } : {}), ...(typeof v.herdr_socket === "string" ? { herdr_socket: v.herdr_socket } : {}), ...(typeof v.own_ovis === "string" ? { own_ovis: v.own_ovis } : {}), ...(v.start_new_herdr === true ? { start_new_herdr: true } : {}) };
 }
 
-export function sameOrigin(request: Request): boolean {
+export function sameOrigin(request: Request, expectedOrigin?: string): boolean {
   const site = request.headers.get("sec-fetch-site");
   if (site && site !== "same-origin" && site !== "none") return false;
-  const origin = request.headers.get("origin");
-  if (!origin) {
-    // No Origin at all. A browser leaves it off its own same-origin GET and HEAD (the PC
-    // event stream, an EventSource, can send no header of its own), so a read keeps passing.
-    // A browser always attaches one to a state-changing request, so a session or device
-    // cookie arriving on one without it is a header that went missing or a non-browser
-    // client, not a same-origin page: it is read as cross-site.
-    // Two ways it is still admitted, both of which a forged browser request cannot use. A
-    // non-browser client can prove itself with a custom mutation header (`x-herdr-machine`, or
-    // `x-herdr-update` on the update routes) — a cross-site page cannot send both the victim's
-    // cookie and that header without a CORS preflight this server never answers. And two endpoints that touch only the requesting device's
-    // own session stay reachable by a cookie-bearing client that can state no origin at all.
-    if (["GET", "HEAD", "OPTIONS"].includes(request.method)) return true;
-    const cookies = parseCookies(request.headers.get("cookie"));
-    if (tokenCookie(cookies) === undefined && deviceCookieValue(cookies) === undefined) return true; // CLI clients
-    if (request.headers.get("x-herdr-machine") === "1" || request.headers.get("x-herdr-update") === "1") return true;
-    const { pathname } = new URL(request.url);
-    return pathname === "/api/auth" || pathname === "/api/push/subscribe";
-  }
+  const targetRaw = (expectedOrigin ?? process.env["OVIS_PUBLIC_ORIGIN"])?.trim();
+  if (!targetRaw) return false;
+  let normalizedTarget: string;
   try {
-    const expected = new URL(request.url);
-    // Reverse proxies commonly terminate HTTPS; do not trust arbitrary forwarded hosts.
-    // Traefik uses "wss" for a secure WebSocket upgrade, whose browser Origin is still https.
-    const proto = request.headers.get("x-forwarded-proto");
-    const websocket = request.method === "GET" && expected.pathname === "/ws"
-      && request.headers.get("upgrade")?.toLowerCase() === "websocket"
-      && request.headers.get("connection")?.split(",").some((part) => part.trim().toLowerCase() === "upgrade");
-    if (proto === "https" || (proto === "wss" && websocket)) expected.protocol = "https:";
-    return new URL(origin).origin === expected.origin;
-  } catch { return false; }
+    normalizedTarget = new URL(targetRaw).origin;
+  } catch {
+    return false;
+  }
+  const origin = request.headers.get("origin");
+  const { pathname } = new URL(request.url);
+  const websocket = request.headers.get("upgrade")?.toLowerCase() === "websocket" || pathname === "/ws";
+  const mutating = !["GET", "HEAD", "OPTIONS"].includes(request.method);
+  if (!origin) return !(websocket || mutating);
+  try {
+    return new URL(origin).origin === normalizedTarget;
+  } catch {
+    return false;
+  }
 }
 export function canSendSecret(request: Request): boolean {
   const url = new URL(request.url);

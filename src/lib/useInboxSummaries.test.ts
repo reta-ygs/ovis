@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 
 import type { Machine } from "../../shared/machines.ts";
 import type { AgentStatus, PaneSummaries, PaneSummary } from "../../shared/protocol.ts";
-import machinesFixture from "../../site/demo/fixtures/machines.json";
+import machinesFixture from "@shared/test-fixtures/machines.json";
 import { inboxOrder } from "./agentInbox.ts";
 import type { SidebarActivity } from "./sidebarActivity.tsx";
 import { SUMMARY_RETRIES, SUMMARY_RETRY_MS, SummaryReads, summaryTargets, type SummaryTarget } from "./useInboxSummaries.ts";

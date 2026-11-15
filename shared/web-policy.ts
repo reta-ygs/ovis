@@ -105,7 +105,7 @@ export function shellContentSecurityPolicy(connect: readonly string[] = []): str
 }
 
 /** The account service when OVIS_ACCOUNT_SERVICE_URL is unset; `OVIS_ACCOUNT_SERVICE_URL=off` names none. */
-export const DEFAULT_ACCOUNT_SERVICE = "https://account.ovis.sh";
+export const DEFAULT_ACCOUNT_SERVICE = "off";
 
 /**
  * The account service the PC's own pages sign in to: OVIS_ACCOUNT_SERVICE_URL's origin when it is

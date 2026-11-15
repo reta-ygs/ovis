@@ -22,14 +22,14 @@ import { shellQuote, validateTarget } from "./machine-security.ts";
 import { parseFoundHerdrSessions, validHerdrSocket } from "./herdr-discovery.ts";
 import { isCoreAdapterSocket } from "./herdr-core/pipe.ts";
 import { writePrivateState } from "./private-state.ts";
-import { holdsDocument, readStateDocument, setAsideDamaged } from "./state-document.ts";
+import { holdsDocument } from "./state-document.ts";
 import { detectHost, HERDR_INSTALL_CMD, installLockOwner, type RemoteHost } from "./remote-host.ts";
 import type { FoundHerdrSession, FoundOvis } from "../shared/machines.ts";
 import { DESKTOP_APP_UPDATES, REVISION, type UpdateStatus } from "../shared/update.ts";
 import { discard, readCappedJson, REMOTE_LIMITS } from "./remote-json.ts";
 import { SshConnection, sshClient } from "./ssh.ts";
 import { WAITING_FOR_WINDOWS_LOGIN } from "./windows-herdr-start.ts";
-import { decodeOffer, SERVER_ID_PATTERN, isWssOrigin, type RelayOffer } from "../shared/relay-offer.ts";
+import { decodeOffer, SERVER_ID_PATTERN, type RelayOffer } from "../shared/relay-offer.ts";
 import { offerFromCode, TypedCodeError } from "../shared/relay-code-offer.ts";
 import { TailnetPcError, TailnetPcs, type TailnetPcsOptions } from "./tailnet-pcs.ts";
 import { sshCandidates, type SshCandidatesOptions } from "./ssh-candidates.ts";
@@ -413,7 +413,6 @@ export class MachineManager {
   private localDiagnostics = new ConnectionDiagnostics("machine.local");
   private remoteDiagnostics = new ConnectionDiagnostics("machine.remote");
   private discoveryTimer?: ReturnType<typeof setTimeout>;
-  private discoveryStarted = false;
   private hcTimer?: ReturnType<typeof setTimeout>;
   private hcStart?: (machine: Pick<HcMachine, "id" | "name">) => Promise<MachineBridge>;
   private settingsPath: string;
@@ -502,71 +501,13 @@ export class MachineManager {
       if (cause !== "ENOENT") console.error(`Cannot read ${this.settingsPath}; remote PC settings start empty`, cause);
     }
     if (this.profileState.setAside !== null) this.setAside.push(basename(this.profileState.setAside));
-    // bytes that are not JSON (a crash can leave the file all NULs) are moved aside and the app starts
-    // without saved PCs; JSON that is not a list of PCs still refuses to start, so nothing replaces it
-    // PCs added through the relay live in a file of their own: a release from before them reads machines.json and
-    // refuses one it does not know, so a rollback would not start (docs/development.md, rollback restores code)
-    for (const path of [this.statePath, this.relayStatePath]) {
-      const relayPcs = path === this.relayStatePath;
-      const read = readStateDocument(path);
-      if (read.kind === "malformed") {
-        const aside = setAsideDamaged(path);
-        this.setAside.push(basename(aside));
-        console.error(`${path} is not JSON; it was set aside as ${aside}, and the app starts without the PCs added here`);
-      }
-      if (read.kind === "json") {
-        const saved = read.value;
-        if (!Array.isArray(saved)) throw new Error(`Invalid ${basename(path)}; registrations were preserved`);
-        for (const item of saved as StoredMachine[]) {
-          if (!/^[a-f0-9-]{36}$/.test(item.id) || typeof item.name !== "string" || typeof item.enabled !== "boolean") throw new Error("Invalid machine registration");
-          const common = { id: item.id, name: item.name, enabled: item.enabled, state: "disconnected" as const, snapshot: item.snapshot ?? null, error: null };
-          let machine: Machine;
-          if (relayPcs) {
-            if (item.kind !== "relay") throw new Error("Invalid machine registration");
-            if (typeof item.relay?.server_id !== "string" || !SERVER_ID_PATTERN.test(item.relay.server_id) || typeof item.relay.relay !== "string" || !isWssOrigin(item.relay.relay)) throw new Error("Invalid machine registration");
-            machine = { ...common, kind: "relay", relay: { server_id: item.relay.server_id, relay: item.relay.relay } };
-          } else if (item.kind === "relay") throw new Error("Invalid machine registration");
-          // its relay ID as its health last said it, so its alerts are known by it before it answers again
-          else machine = { ...common, kind: "ssh", target: validateTarget(item.target), ...(typeof item.server_id === "string" && SERVER_ID_PATTERN.test(item.server_id) ? { server_id: item.server_id } : {}) };
-          const runtime = this.runtime(machine);
-          this.machines.set(item.id, runtime);
-          if (item.enabled) queueMicrotask(() => void this.reconnect(runtime));
-        }
-      }
-    }
-    // the saved PCs' addresses, resolved in the background now they are loaded, for the checks that keep one job per PC
-    void warmSshAddresses([...this.machines.values()].flatMap((runtime) => runtime.machine.kind === "ssh" && runtime.machine.target ? [runtime.machine.target] : []));
+    // Remote machine restoration and SSH warming are disabled by security policy.
     void this.refreshLocal();
     this.localTimer = setInterval(() => void this.refreshLocal(), 5000);
     this.localTimer.unref();
   }
-  /** Serial polling: a broken catalog preserves the last roster instead of removing PCs. */
-  watchHerdrProfiles(read: () => Promise<HerdrMachineProfile[]>, intervalMs = 5000): void {
-    if (this.discoveryStarted || this.stopped) return;
-    this.discoveryStarted = true;
-    let failures = 0, previousError: string | undefined, previousSyncError: string | undefined;
-    const poll = async () => {
-      let profiles: HerdrMachineProfile[] | undefined;
-      try {
-        profiles = await read();
-        failures = 0; previousError = undefined;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "read failed";
-        if (!this.stopped && previousError !== message) console.error("Saved herdr machines could not be refreshed:", message);
-        previousError = message; failures++;
-      }
-      if (profiles && !this.stopped) {
-        try { this.syncHerdrProfiles(profiles); previousSyncError = undefined; }
-        catch (error) {
-          const message = error instanceof Error ? error.message : "sync failed";
-          if (previousSyncError !== message) console.error("Saved herdr machines could not be reconciled:", message);
-          previousSyncError = message;
-        }
-      }
-      const delay = Math.min(300_000, intervalMs * 2 ** Math.min(failures, 10));
-      if (!this.stopped) { this.discoveryTimer = setTimeout(poll, delay); this.discoveryTimer.unref(); }
-    };
-    void poll();
+  watchHerdrProfiles(_read: () => Promise<HerdrMachineProfile[]>, _intervalMs = 5000): void {
+    clearTimeout(this.discoveryTimer);
   }
   syncHerdrProfiles(profiles: HerdrMachineProfile[]): void {
     if (this.stopped) return;
@@ -637,22 +578,9 @@ export class MachineManager {
    * server starts as it connects (`start`, herdr-core/machine-bridge.ts) and reaches its terminals through
    * this PC's core. A broken read keeps the PCs as they were.
    */
-  watchHcMachines(read: () => Promise<HcMachine[]>, start: (machine: Pick<HcMachine, "id" | "name">) => Promise<MachineBridge>, intervalMs = 5000): void {
-    if (this.hcStart || this.stopped) return;
-    this.hcStart = start;
-    let failures = 0, previousError: string | undefined;
-    const poll = async () => {
-      try {
-        this.syncHcMachines(await read());
-        failures = 0; previousError = undefined;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "read failed";
-        if (!this.stopped && previousError !== message) console.error("herdr-core's machines could not be read:", message);
-        previousError = message; failures++;
-      }
-      if (!this.stopped) { this.hcTimer = setTimeout(poll, Math.min(60_000, intervalMs * 2 ** Math.min(failures, 4))); this.hcTimer.unref(); }
-    };
-    void poll();
+  watchHcMachines(_read: () => Promise<HcMachine[]>, _start: (machine: Pick<HcMachine, "id" | "name">) => Promise<MachineBridge>, _intervalMs = 5000): void {
+    clearTimeout(this.hcTimer);
+    this.hcStart = undefined;
   }
   syncHcMachines(list: readonly HcMachine[]): void {
     if (this.stopped) return;

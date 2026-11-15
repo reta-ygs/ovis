@@ -127,6 +127,10 @@ export function manifestBody(text: string, origin: string): string {
  * proxy states one (http or https), else the request URL's, and the host from the Host header.
  */
 export function requestOrigin(request: Request): string {
+  const configured = process.env["OVIS_PUBLIC_ORIGIN"]?.trim();
+  if (configured) {
+    try { return new URL(configured).origin; } catch { /* ignore invalid OVIS_PUBLIC_ORIGIN */ }
+  }
   const url = new URL(request.url);
   const forwarded = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
   const scheme = forwarded === "http" || forwarded === "https" ? forwarded : url.protocol.slice(0, -1);

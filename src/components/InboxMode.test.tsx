@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import type { Machine } from "../../shared/machines.ts";
 import type { AgentStatus, HerdrPane } from "../../shared/protocol.ts";
-import machinesFixture from "../../site/demo/fixtures/machines.json";
+import machinesFixture from "@shared/test-fixtures/machines.json";
 import type { HeaderConnection } from "../lib/headerConnection.ts";
 import { SettingsProvider } from "../lib/settings.ts";
 import type { SidebarActivity } from "../lib/sidebarActivity.tsx";
