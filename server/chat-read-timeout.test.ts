@@ -4,14 +4,15 @@ import { get } from "node:http";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { testCfAccess } from "./cf-access.fake.ts";
 import { createServer } from "./index.ts";
 import { forgetTranscriptState } from "./conversation.ts";
 import { socketAddress } from "./herdr/client.ts";
 
 /** One HTTP attempt: fetch may retry a connection that Bun's idle timer closed. */
-function read(url: string): Promise<{ status: number; body: any }> {
+function read(url: string, headers: Record<string, string>): Promise<{ status: number; body: any }> {
   return new Promise((resolve, reject) => {
-    const request = get(url, { agent: false }, (response) => {
+    const request = get(url, { agent: false, headers }, (response) => {
       let body = "";
       response.setEncoding("utf8");
       response.on("data", (chunk) => { body += chunk; });
@@ -78,19 +79,20 @@ it("keeps chat history readable while valid sequential herdr calls outlast HTTP 
   });
   let app: ReturnType<typeof createServer> | undefined;
   try {
+    const access = await testCfAccess();
     await new Promise<void>((resolve, reject) => { daemon.once("error", reject); daemon.listen(socketAddress(socketPath), resolve); });
     process.env.HERDR_SOCKET = socketPath;
     forgetTranscriptState();
-    app = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "state"), codexHome, herdrProfiles: async () => [], registerBridge: false, tailscaleOwner: null });
+    app = createServer({ port: 0, hostname: "127.0.0.1", stateDir: join(root, "state"), codexHome, herdrProfiles: async () => [], registerBridge: false, cfAccess: access.cfAccess });
     const base = `http://127.0.0.1:${app.port}/api/pane/`;
-    const initial = await read(`${base}conversation?pane_id=fixture`);
+    const initial = await read(`${base}conversation?pane_id=fixture`, access.headers());
     expect(initial.status).toBe(200);
     expect(initial.body.cursor).toBeString();
     slow = true;
     const [newest, history, stalled] = await Promise.all([
-      read(`${base.replace("/api/pane/", "/api/machines/local/pane/")}conversation?pane_id=fixture`),
-      read(`${base}conversation?pane_id=fixture&before=${encodeURIComponent(initial.body.cursor)}`),
-      read(`${base}read?pane_id=fixture&source=recent`),
+      read(`${base.replace("/api/pane/", "/api/machines/local/pane/")}conversation?pane_id=fixture`, access.headers()),
+      read(`${base}conversation?pane_id=fixture&before=${encodeURIComponent(initial.body.cursor)}`, access.headers()),
+      read(`${base}read?pane_id=fixture&source=recent`, access.headers()),
     ]);
     expect(newest.status).toBe(200);
     expect(newest.body.turns.at(-1).parts).toContainEqual({ kind: "text", text: answer(119) });

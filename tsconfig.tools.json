@@ -28,8 +28,6 @@
     "scripts/release-notes.ts",
     "scripts/release-guards.ts",
     "scripts/release-ci-reuse.ts",
-    "scripts/release-ci-reuse.test.ts",
-    "scripts/release-validate-workflow.test.ts",
     "scripts/changelog-fold.ts",
     "scripts/build-remote-bundle.ts",
     "scripts/ssh-integration.ts",

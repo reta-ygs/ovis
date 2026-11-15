@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentStatus, SessionSnapshot } from "../shared/protocol.ts";
-import machines from "@shared/test-fixtures/machines.json";
+import machines from "../shared/test-fixtures/machines.json";
 import { CompletionTracker } from "./completion.ts";
 import { Finishes, finishHerdrIdentity, herdrLifetime } from "./finishes.ts";
 import { LaunchedAgents } from "./launched-agents.ts";

@@ -10,7 +10,7 @@ export interface CfAccessConfig {
 }
 
 export type CfAccessVerifyResult =
-  | { readonly ok: true; readonly email: string; readonly sub: string }
+  | { readonly ok: true; readonly email: string; readonly sub: string; readonly exp: number; readonly expiresAtMs: number }
   | { readonly ok: false; readonly reason: string };
 
 export interface CfAccessVerifier {
@@ -292,7 +292,44 @@ export function createCfAccessVerifier(
       if (!config.allowedEmails.has(email)) return { ok: false, reason: "email_not_allowed" };
 
       const sub = typeof payload["sub"] === "string" ? payload["sub"] : "";
-      return { ok: true, email, sub };
+      const expiresAtMs = (exp + CLOCK_SKEW_SEC) * 1000;
+      return { ok: true, email, sub, exp, expiresAtMs };
     },
+  };
+}
+
+const MAX_TIMEOUT_MS = 0x7fff_ffff;
+
+/** Runs `onExpire` once `expiresAtMs` is reached, chaining <= 2^31-1 ms timers so long TTLs cannot overflow. */
+export function scheduleCfAccessExpiry(
+  expiresAtMs: number,
+  onExpire: () => void,
+  now: () => number = () => Date.now(),
+): () => void {
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const arm = () => {
+    if (stopped) return;
+    const remaining = expiresAtMs - now();
+    const delay = !Number.isFinite(remaining) || remaining <= 0 ? 0 : Math.min(remaining, MAX_TIMEOUT_MS);
+    timer = setTimeout(() => {
+      timer = undefined;
+      if (stopped) return;
+      const left = expiresAtMs - now();
+      if (!Number.isFinite(left) || left <= 0) {
+        stopped = true;
+        onExpire();
+        return;
+      }
+      arm();
+    }, delay);
+  };
+  arm();
+  return () => {
+    stopped = true;
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
   };
 }

@@ -7,6 +7,7 @@ import type { SessionSnapshot } from "../shared/protocol.ts";
 import * as herdr from "./herdr/client.ts";
 import { HerdrError, type PluginActionInfo, type PluginCommandLog } from "./herdr/client.ts";
 import { createServer } from "./index.ts";
+import { testCfAccess } from "./cf-access.fake.ts";
 import { pluginPaneContext } from "./plugin-actions.ts";
 
 const PLATFORM = process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux";
@@ -29,15 +30,17 @@ describe("plugin routes", () => {
   const actionList = spyOn(herdr, "pluginActionList").mockImplementation(async () => actions);
   const logs = spyOn(herdr, "pluginLogList").mockImplementation(async () => [finished]);
   const invoke = spyOn(herdr, "pluginActionInvoke").mockImplementation(async () => ({ log: { log_id: "log-2", plugin_id: "deploy", status: "succeeded", exit_code: 0, stdout: "done" } }));
+  const access = testCfAccess();
   const url = (path: string) => `http://127.0.0.1:${server.port}${path}`;
+  const get = (path: string) => fetch(url(path), { headers: access.headers() });
   const post = (path: string, body: unknown, method = "POST") => fetch(url(path), {
-    method, headers: { "content-type": "application/json", origin: url("") }, body: typeof body === "string" ? body : JSON.stringify(body),
+    method, headers: access.originHeaders({ "content-type": "application/json" }), body: typeof body === "string" ? body : JSON.stringify(body),
   });
   const error = async (response: Response) => [response.status, ((await response.json()) as { error: { code: string } }).error.code];
 
   beforeAll(() => {
     stateDir = mkdtempSync(join(tmpdir(), "ovis-plugin-routes-"));
-    server = createServer({ port: 0, hostname: "127.0.0.1", stateDir, token: "", machines: false, sidecar: false });
+    server = createServer({ port: 0, hostname: "127.0.0.1", stateDir, token: "", machines: false, sidecar: false, cfAccess: access.cfAccess });
   });
   afterEach(() => {
     for (const spy of [list, actionList, logs, invoke]) spy.mockClear();
@@ -49,7 +52,7 @@ describe("plugin routes", () => {
   });
 
   it("lists each plugin with the actions this platform runs, without their command lines", async () => {
-    const response = await fetch(url("/api/plugins/actions"));
+    const response = await get("/api/plugins/actions");
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
       plugins: [
@@ -67,15 +70,15 @@ describe("plugin routes", () => {
   });
 
   it("answers how a run ended from the plugin's log, and what it cannot look up", async () => {
-    expect(await error(await fetch(url("/api/plugin/action?log_id=log-1")))).toEqual([400, "missing_plugin_id"]);
-    expect(await error(await fetch(url("/api/plugin/action?plugin_id=deploy")))).toEqual([400, "missing_log_id"]);
-    const response = await fetch(url("/api/plugin/action?plugin_id=deploy&log_id=log-1"));
+    expect(await error(await get("/api/plugin/action?log_id=log-1"))).toEqual([400, "missing_plugin_id"]);
+    expect(await error(await get("/api/plugin/action?plugin_id=deploy"))).toEqual([400, "missing_log_id"]);
+    const response = await get("/api/plugin/action?plugin_id=deploy&log_id=log-1");
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ log_id: "log-1", status: "failed", exit_code: 2, output: "boom", opened_pane_id: null });
     expect(logs).toHaveBeenCalledWith("deploy", 200);
-    expect(await error(await fetch(url("/api/plugin/action?plugin_id=deploy&log_id=gone")))).toEqual([404, "plugin_log_not_found"]);
+    expect(await error(await get("/api/plugin/action?plugin_id=deploy&log_id=gone"))).toEqual([404, "plugin_log_not_found"]);
     logs.mockImplementationOnce(async () => { throw new HerdrError("connect_failed", "herdr is not answering"); });
-    expect(await error(await fetch(url("/api/plugin/action?plugin_id=deploy&log_id=log-1")))).toEqual([502, "connect_failed"]);
+    expect(await error(await get("/api/plugin/action?plugin_id=deploy&log_id=log-1"))).toEqual([502, "connect_failed"]);
   });
 
   it("validates a run before asking herdr, and refuses other methods", async () => {

@@ -80,14 +80,16 @@ test("a session read still waiting on herdr when a move is confirmed carries the
   });
   let app: ReturnType<typeof createServer> | undefined;
   try {
+    const { testCfAccess } = await import("./cf-access.fake.ts");
+    const access = await testCfAccess();
     await new Promise<void>((resolve, reject) => { daemon.once("error", reject); daemon.listen(socketAddress(socketPath), resolve); });
     process.env.HERDR_SOCKET = socketPath;
     app = createServer({
-      port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "state"), machines: false, registerBridge: false,
-      herdrProfiles: async () => [], tailscaleOwner: null, terminalAttach: false, sidecar: false, usage: new UsageService(undefined, []),
+      port: 0, hostname: "127.0.0.1", stateDir: join(root, "state"), machines: false, registerBridge: false,
+      herdrProfiles: async () => [], terminalAttach: false, sidecar: false, usage: new UsageService(undefined, []), cfAccess: access.cfAccess,
     });
     const origin = `http://127.0.0.1:${app.port}`;
-    const session = async () => ((await (await fetch(`${origin}/api/session`)).json()) as { snapshot: SessionSnapshot }).snapshot;
+    const session = async () => ((await (await fetch(`${origin}/api/session`, { headers: access.headers() })).json()) as { snapshot: SessionSnapshot }).snapshot;
     expect(await session()).toMatchObject({ read_seq: 0 });
     let fenced = 0;
     let moves = 0;
@@ -98,7 +100,7 @@ test("a session read still waiting on herdr when a move is confirmed carries the
       const reading = session();
       if (held.length === 0) await new Promise<void>((resolve) => { heldWaiter = resolve; });
       heldWaiter = null;
-      const response = await fetch(`${origin}/api/workspace/move`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspace_id: "w1", insert_index: 0 }) });
+      const response = await fetch(`${origin}/api/workspace/move`, { method: "POST", headers: access.originHeaders({ "content-type": "application/json" }), body: JSON.stringify({ workspace_id: "w1", insert_index: 0 }) });
       const receipt = (await response.json()) as WorkspaceMoved;
       expect(receipt.moved_seq).toBe(++moves);
       holding = false;

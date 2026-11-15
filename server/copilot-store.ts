@@ -362,7 +362,7 @@ function scanForegroundLog(pid: number, logDirectories: readonly string[], store
           }
           const changed: StoreDiagnostic | undefined = !cached ? undefined
             : cached.dev !== stat.dev || cached.ino !== stat.ino || cached.path !== target ? "copilot_log_replaced"
-            : size < cached.size ? "copilot_log_truncated"
+            : size < cached.size || size < cached.observedSize ? "copilot_log_truncated"
             : size - cached.size > LOG_WINDOW_BYTES ? "copilot_log_gap"
             : prefix?.copy().digest("hex") !== cached.hash.copy().digest("hex") ? "copilot_log_rewritten"
             // Every rotation makes a new newest copy: bytes that still start the same are no append across one.

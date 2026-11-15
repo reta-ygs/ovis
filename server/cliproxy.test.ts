@@ -8,6 +8,7 @@ import { CLIProxyService } from "./cliproxy.ts";
 import { startFakeCLIProxy } from "./cliproxy.fake.ts";
 import { CLIProxyRoutes } from "./cliproxy-routes.ts";
 import { createServer } from "./index.ts";
+import { testCfAccess } from "./cf-access.fake.ts";
 import { FRESH_MS, UsageService, type UsageContext } from "./usage.ts";
 
 const KEY = "test-management-secret-not-in-responses";
@@ -50,18 +51,19 @@ describe("CLIProxyAPI v8", () => {
   it("starts the web UI and allows removal when hub configuration is corrupt", async () => {
     // Given
     writeFileSync(join(dir, "cliproxy.json"), "garbage");
+    const access = testCfAccess();
     // When
     const app = createServer({
       port: 0, hostname: "127.0.0.1", token: "", stateDir: dir,
-      machines: false, registerBridge: false, terminalAttach: false, sidecar: false,
+      machines: false, registerBridge: false, terminalAttach: false, sidecar: false, cfAccess: access.cfAccess,
     });
     // Then
     try {
       const origin = `http://127.0.0.1:${app.port}`;
-      expect((await fetch(`${origin}/api/health?scope=bridge`)).status).toBe(200);
-      const status = await fetch(`${origin}/api/cliproxy`);
+      expect((await fetch(`${origin}/api/health?scope=bridge`, { headers: access.headers() })).status).toBe(200);
+      const status = await fetch(`${origin}/api/cliproxy`, { headers: access.headers() });
       expect(await status.json()).toMatchObject({ configured: false, ok: false, problem: expect.any(String) });
-      const removed = await fetch(`${origin}/api/cliproxy`, { method: "DELETE" });
+      const removed = await fetch(`${origin}/api/cliproxy`, { method: "DELETE", headers: access.originHeaders() });
       expect(removed.status).toBe(200);
       expect(await removed.json()).toMatchObject({ configured: false, problem: null });
       expect(new CLIProxyService(dir).status()).toMatchObject({ configured: false, problem: null });
@@ -1148,9 +1150,10 @@ describe("CLIProxyAPI v8", () => {
 
     it("refuses a retried hide while which account it is still cannot be saved (#3428)", async () => {
       mkdirSync(join(dir, "cliproxy-hidden.json"));
-      const app = createServer({ port: 0, hostname: "127.0.0.1", token: "t", stateDir: dir, tailscaleOwner: null, machines: false, registerBridge: false, terminalAttach: false, sidecar: false });
+      const access = testCfAccess();
+      const app = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: dir, tailscaleOwner: null, machines: false, registerBridge: false, terminalAttach: false, sidecar: false, cfAccess: access.cfAccess });
       try {
-        const hide = () => fetch(`http://127.0.0.1:${app.port}/api/preferences`, { method: "PUT", headers: { "content-type": "application/json", "x-herdr-machine": "1", authorization: "Bearer t" }, body: JSON.stringify({ settings: { usageHidden: ["claude:cliproxy:claude-a.json"] } }) });
+        const hide = () => fetch(`http://127.0.0.1:${app.port}/api/preferences`, { method: "PUT", headers: access.originHeaders({ "content-type": "application/json", "x-herdr-machine": "1" }), body: JSON.stringify({ settings: { usageHidden: ["claude:cliproxy:claude-a.json"] } }) });
         expect((await hide()).status).toBe(500);
         expect((await hide()).status).toBe(500);
         rmSync(join(dir, "cliproxy-hidden.json"), { recursive: true });

@@ -8,6 +8,7 @@ import { CompletionTracker, type OmoRest } from "./completion.ts";
 import { Finishes } from "./finishes.ts";
 import { createGjcStatus } from "./gjc-status.ts";
 import { createServer } from "./index.ts";
+import { testCfAccess } from "./cf-access.fake.ts";
 import { paneAfterStatus } from "./machines.ts";
 import { earliestStart, holderStartedAt } from "./omo.ts";
 import { projectStateKey } from "./omo-state-dir.ts";
@@ -556,8 +557,9 @@ describe("OmO panes' status in place of herdr's", () => {
       onChange: (_id, status) => told.push(status),
       turnAfter: (turn, line) => { started.resolve(); return omoTurnAfter(turn, line); },
     });
-    const server = createServer({ hostname: "127.0.0.1", port: 0, stateDir: mkdtempSync(join(root, "server-")), token: "", machines: false, sidecar: false, tailscaleOwner: null });
-    const health = () => fetch(`http://127.0.0.1:${server.port}/api/health?scope=bridge`, { signal: AbortSignal.timeout(5000) });
+    const access = testCfAccess();
+    const server = createServer({ hostname: "127.0.0.1", port: 0, stateDir: mkdtempSync(join(root, "server-")), token: "", machines: false, sidecar: false, cfAccess: access.cfAccess, tailscaleOwner: null });
+    const health = () => fetch(`http://127.0.0.1:${server.port}/api/health?scope=bridge`, { headers: access.headers(), signal: AbortSignal.timeout(5000) });
     expect((await health()).status).toBe(200);
     const replay = omo.refresh(herdr().panes).then(() => { finished = true; });
     try {

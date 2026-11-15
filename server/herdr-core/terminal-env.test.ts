@@ -148,7 +148,8 @@ it.skipIf(win)("reads an exported bash function and a value holding newlines as 
   // regression: read line by line, the function's body went into PATH and a value's `API_TOKEN=…` line became a variable
   // the profile changes PATH itself, so it is sent whatever the host's /etc/profile does
   const home = homeWith("greet() { echo hi; }\nexport -f greet\nexport MULTI='first\nAPI_TOKEN=inside-a-value'\nexport PATH=\"/fn-test:$PATH\"\n");
-  const env = await loginTerminalEnv({ env: { ...fromAgent(home), SHELL: "/bin/bash" }, shell: "/bin/bash" });
+  const bash = Bun.which("bash") ?? "/bin/bash";
+  const env = await loginTerminalEnv({ env: { ...fromAgent(home), SHELL: bash }, shell: bash });
   expect(env["MULTI"]).toBe("first\nAPI_TOKEN=inside-a-value");
   expect(env["PATH"]).toStartWith("/fn-test:");
   expect(env["PATH"]).not.toContain("\n");

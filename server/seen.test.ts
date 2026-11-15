@@ -185,12 +185,14 @@ describe("read finishes shared by the browsers of a server", () => {
     const manager = { subscribe: () => () => undefined } as unknown as MachineManager;
     const abort = new AbortController();
     const response = await handleMachineRequest(new Request("http://127.0.0.1:7317/api/machines/events", { signal: abort.signal }), manager,
-      undefined, undefined, false, undefined, store);
+      undefined, undefined, false, undefined, store, undefined, undefined, undefined, "http://127.0.0.1:7317");
+    expect(response.status).toBe(200);
     const reader = response.body!.getReader();
     const events: MachineEvent[] = [];
     let buffer = "";
     const read = async (): Promise<void> => {
-      const { value } = await reader.read();
+      const { value, done } = await reader.read();
+      if (done) throw new Error("machine events stream ended unexpectedly");
       buffer += new TextDecoder().decode(value);
       for (let end = buffer.indexOf("\n\n"); end >= 0; end = buffer.indexOf("\n\n")) {
         const frame = buffer.slice(0, end);

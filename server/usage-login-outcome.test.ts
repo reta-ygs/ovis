@@ -6,10 +6,12 @@ import { join } from "node:path";
 import type { UsageLoginFollowed, UsageLoginPrompt } from "../shared/usage-login.ts";
 import type { UsageReport } from "../shared/protocol.ts";
 import { createServer } from "./index.ts";
+import { testCfAccess } from "./cf-access.fake.ts";
 import { PtySession } from "./pty/session.ts";
 import { UsageLoginService } from "./usage-login.ts";
 import { homeSignIn, UsageService, USAGE_PROVIDERS, type UsageContext } from "./usage.ts";
 
+const access = testCfAccess();
 const roots: string[] = [];
 const servers: ReturnType<typeof createServer>[] = [];
 afterEach(() => {
@@ -85,6 +87,7 @@ process.exit(plan.exit);
     const server = createServer({
       port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "state"),
       machines: false, registerBridge: false, sidecar: false, terminalAttach: false,
+      cfAccess: access.cfAccess,
       herdrConfigPath: join(root, "herdr.toml"),
       usage: new UsageService(ctx, USAGE_PROVIDERS.filter((provider) => provider.id === "claude")),
       usageLogin: login,
@@ -98,13 +101,13 @@ process.exit(plan.exit);
 /** A Codex sign-in runs to its end without a code: the fake signs in as codex-plan.json says. */
 async function completeCodexLogin(host: ReturnType<ReturnType<typeof fixture>["start"]>, body: object) {
   const started = await fetch(`${host.origin}/api/usage/login`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...body, provider: "codex", follow: true }),
+    method: "POST", headers: access.originHeaders({ "content-type": "application/json" }), body: JSON.stringify({ ...body, provider: "codex", follow: true }),
   });
   expect(started.status).toBe(200);
   const { login_id: id }: UsageLoginFollowed = await started.json();
   const cookie = started.headers.get("set-cookie")?.split(";")[0] ?? "";
   await host.login.settled(id);
-  const prompt: UsageLoginPrompt = await (await fetch(`${host.origin}/api/usage/login/prompt?login=${id}`, { headers: { cookie } })).json();
+  const prompt: UsageLoginPrompt = await (await fetch(`${host.origin}/api/usage/login/prompt?login=${id}`, { headers: access.headers({ cookie }) })).json();
   expect(prompt.ended).toBe(true);
   return prompt;
 }
@@ -117,12 +120,12 @@ const codexAuth = (email: string) => {
 /** Starts a followed Claude sign-in and waits until its CLI asks for the code. */
 async function untilCode(host: ReturnType<ReturnType<typeof fixture>["start"]>, body: object) {
   const started = await fetch(`${host.origin}/api/usage/login`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...body, follow: true }),
+    method: "POST", headers: access.originHeaders({ "content-type": "application/json" }), body: JSON.stringify({ ...body, follow: true }),
   });
   expect(started.status).toBe(200);
   const { login_id: id }: UsageLoginFollowed = await started.json();
   const cookie = started.headers.get("set-cookie")?.split(";")[0] ?? "";
-  const prompt = async (): Promise<UsageLoginPrompt> => (await fetch(`${host.origin}/api/usage/login/prompt?login=${id}`, { headers: { cookie } })).json();
+  const prompt = async (): Promise<UsageLoginPrompt> => (await fetch(`${host.origin}/api/usage/login/prompt?login=${id}`, { headers: access.headers({ cookie }) })).json();
   for (;;) {
     const changed = host.login.changed(id);
     const current = await prompt();
@@ -131,7 +134,7 @@ async function untilCode(host: ReturnType<ReturnType<typeof fixture>["start"]>, 
     await changed;
   }
   const post = (path: string, extra: object = {}) => fetch(`${host.origin}/api/usage/login/${path}`, {
-    method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ login: id, ...extra }),
+    method: "POST", headers: access.originHeaders({ "content-type": "application/json", cookie }), body: JSON.stringify({ login: id, ...extra }),
   });
   return { id, prompt, post };
 }
@@ -179,7 +182,7 @@ it("re-authenticates the expired account in its own home and reports it signed i
   const other = readFileSync(join(root, ".claude-work", ".credentials.json"), "utf8");
   const result = await completeLogin(host, { provider: "claude", account: "claude:expired" }, "success");
   expect(result.succeeded).toBe(true);
-  const report: UsageReport = await (await fetch(`${host.origin}/api/usage`)).json();
+  const report: UsageReport = await (await fetch(`${host.origin}/api/usage`, { headers: access.headers() })).json();
   expect(report.providers.find((account) => account.key === "claude:expired")?.problem).toBeNull();
   expect(readFileSync(join(root, ".claude-work", ".credentials.json"), "utf8")).toBe(other);
 });

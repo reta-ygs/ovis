@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { createServer as createSocketServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { testCfAccess, type TestCfFixture } from "./cf-access.fake.ts";
 import { createServer } from "./index.ts";
 import { socketAddress } from "./herdr/client.ts";
 
@@ -58,8 +59,10 @@ it("records abnormal browser closes without their reason, coalesces repeats and 
     if (serverCloses >= count) { clearTimeout(timer); resolve(); }
   });
   let closed = 0;
+  let access!: TestCfFixture;
   async function close(code: number): Promise<void> {
-    const ws = new WebSocket(`ws://127.0.0.1:${app!.port}/ws`);
+    const RuntimeSocket = WebSocket as unknown as new (url: string, options: { headers: Record<string, string> }) => WebSocket;
+    const ws = new RuntimeSocket(`ws://127.0.0.1:${app!.port}/ws`, { headers: access.originHeaders() });
     browsers.add(ws);
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("fixture WebSocket did not close")), 2000);
@@ -70,9 +73,10 @@ it("records abnormal browser closes without their reason, coalesces repeats and 
     await serverClosed(++closed);
   }
   try {
+    access = await testCfAccess();
     await new Promise<void>((resolve, reject) => { daemon.once("error", reject); daemon.listen(socketAddress(path), resolve); });
     process.env.HERDR_SOCKET = path;
-    app = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "state"), machines: false, herdrProfiles: async () => [], registerBridge: false, tailscaleOwner: null });
+    app = createServer({ port: 0, hostname: "127.0.0.1", stateDir: join(root, "state"), machines: false, herdrProfiles: async () => [], registerBridge: false, cfAccess: access.cfAccess });
     await close(1000);
     expect(records()).toHaveLength(0);
     await close(4001);

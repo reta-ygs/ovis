@@ -8,6 +8,7 @@ import { HerdrError } from "./herdr/client.ts";
 import type { HerdrPane } from "../shared/protocol.ts";
 import { claudeArtifacts, forgetArtifacts, handleArtifactsRequest } from "./claude-artifacts.ts";
 import { ClaudeSubagentStatus } from "./claude-subagents.ts";
+import { testCfAccess, type TestCfFixture } from "./cf-access.fake.ts";
 import { createServer } from "./index.ts";
 
 // the records Claude Code 2.1.312 writes for an Artifact call and its answer (synthetic content)
@@ -66,12 +67,14 @@ describe("claudeArtifacts", () => {
 describe("GET /api/pane/artifacts", () => {
   let server: ReturnType<typeof createServer>;
   let stateDir: string;
+  let access: TestCfFixture;
   const url = (path: string) => `http://127.0.0.1:${server.port}${path}`;
   const error = async (response: Response) => [response.status, ((await response.json()) as { error: { code: string } }).error.code];
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    access = await testCfAccess();
     stateDir = mkdtempSync(join(tmpdir(), "ovis-artifacts-route-"));
-    server = createServer({ port: 0, hostname: "127.0.0.1", stateDir, token: "", machines: false, sidecar: false });
+    server = createServer({ port: 0, hostname: "127.0.0.1", stateDir, machines: false, sidecar: false, cfAccess: access.cfAccess });
   });
   afterAll(() => {
     server.stop();
@@ -79,11 +82,11 @@ describe("GET /api/pane/artifacts", () => {
   });
 
   it("wants GET and a pane, and answers none for a pane that runs no Claude Code", async () => {
-    expect(await error(await fetch(url("/api/pane/artifacts?pane_id=w1:p1"), { method: "POST", headers: { origin: url("") } }))).toEqual([400, "method_not_allowed"]);
-    expect(await error(await fetch(url("/api/pane/artifacts")))).toEqual([400, "missing_pane_id"]);
+    expect(await error(await fetch(url("/api/pane/artifacts?pane_id=w1:p1"), { method: "POST", headers: access.originHeaders() }))).toEqual([400, "method_not_allowed"]);
+    expect(await error(await fetch(url("/api/pane/artifacts"), { headers: access.headers() }))).toEqual([400, "missing_pane_id"]);
     const get = spyOn(herdr, "paneGet").mockImplementation(async (paneId) => { throw new HerdrError("pane_not_found", `pane ${paneId} not found`); });
     try {
-      const response = await fetch(url("/api/pane/artifacts?pane_id=w9:p9"));
+      const response = await fetch(url("/api/pane/artifacts?pane_id=w9:p9"), { headers: access.headers() });
       expect(response.status).toBe(200);
       expect(await response.json()).toEqual({ artifacts: [] });
     } finally {

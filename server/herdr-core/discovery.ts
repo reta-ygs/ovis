@@ -133,7 +133,9 @@ function insideProfile(bin: string, home: string): string | null {
 }
 
 /** the PATH a probe gets when no PATH folder passes the check */
-const SYSTEM_PATH = ["/usr/bin", "/bin"];
+const SYSTEM_PATH = process.platform === "linux"
+  ? ["/usr/bin", "/bin", "/run/current-system/sw/bin"]
+  : ["/usr/bin", "/bin"];
 
 /** the most links followed to reach one candidate, as the kernel allows (Linux's MAXSYMLINKS) */
 const MAX_LINKS = 40;
@@ -317,7 +319,8 @@ export function aclReader(options: { platform?: NodeJS.Platform; getfacl?: strin
     }
     if (getfacl === undefined) getfacl = Bun.which("getfacl", { PATH: SYSTEM_PATH.join(delimiter) });
     if (getfacl === null) {
-      const listing = read(["/bin/ls", "-ld", "--", path]);
+      const ls = Bun.which("ls", { PATH: SYSTEM_PATH.join(delimiter) }) ?? "/bin/ls";
+      const listing = read([ls, "-ld", "--", path]);
       return listing === null || /^\S{10}\+/.test(listing);
     }
     const acl = read([getfacl, "-cpn", "--", path]);

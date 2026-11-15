@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DeviceStore } from "./devices.ts";
 import { createServer } from "./index.ts";
+import { testCfAccess } from "./cf-access.fake.ts";
 import { MACHINE_PROXY_PATH } from "./machine-api.ts";
 import { PullRequestError, mergePullRequest, pullRequestLog, pullRequestView } from "./pull-request.ts";
 import { PULL_REQUEST_LOG_LINES } from "../shared/pull-request.ts";
@@ -182,17 +183,18 @@ describe("merging", () => {
 });
 
 describe("the /api/workspace/pr routes", () => {
+  const access = testCfAccess();
   let server: ReturnType<typeof createServer>;
   let base: string;
   let watchCookie: string;
   const stateDir = mkdtempSync(join(tmpdir(), "ovis-pull-request-state-"));
-  const owner = { authorization: "Bearer test-pull-request" };
+  const owner = access.headers();
   beforeAll(() => {
     const store = new DeviceStore(stateDir);
     const watchToken = store.pair(store.startPairing().code, "Watch", "watch")!.token;
     expect(store.match(watchToken)).not.toBeNull();
     watchCookie = `ovis_device=${watchToken}`;
-    server = createServer({ port: 0, stateDir, token: "test-pull-request", tailscaleOwner: null, machines: false });
+    server = createServer({ port: 0, stateDir, token: "", tailscaleOwner: null, machines: false, cfAccess: access.cfAccess });
     base = `http://127.0.0.1:${server.port}`;
   });
   afterAll(() => { server.stop(); rmSync(stateDir, { recursive: true, force: true }); });
@@ -202,11 +204,16 @@ describe("the /api/workspace/pr routes", () => {
     expect(MACHINE_PROXY_PATH.test("workspace/pr/other")).toBe(false);
   });
 
-  it("is closed to a device that can only watch, on this PC and through a PC's route", async () => {
+  it("rejects legacy device cookies without Cloudflare Access and refuses remote machine routes on a bridge-only server", async () => {
     for (const path of ["workspace/pr", "workspace/pr/log", "machines/pc1/workspace/pr", "machines/pc1/workspace/pr/log"]) {
       const response = await fetch(`${base}/api/${path}?directory=${encodeURIComponent(scratch)}&job_id=1`, { headers: { cookie: watchCookie } });
-      expect([path, response.status]).toEqual([path, 403]);
-      expect(((await response.json()) as { error: { code: string } }).error.code).toBe("read_only");
+      expect([path, response.status]).toEqual([path, 401]);
+      expect(((await response.json()) as { error: { code: string } }).error.code).toBe("cf_access_required");
+    }
+    for (const path of ["machines/pc1/workspace/pr", "machines/pc1/workspace/pr/log"]) {
+      const response = await fetch(`${base}/api/${path}?directory=${encodeURIComponent(scratch)}&job_id=1`, { headers: owner });
+      expect([path, response.status]).toEqual([path, 404]);
+      expect(((await response.json()) as { error: { code: string } }).error.code).toBe("bridge_only");
     }
   });
 
@@ -215,7 +222,7 @@ describe("the /api/workspace/pr routes", () => {
     expect(missing.status).toBe(400);
     expect(((await missing.json()) as { error: { code: string } }).error.code).toBe("missing_directory");
     for (const body of [{ directory: scratch }, { directory: scratch, number: 12, head_oid: "nope", method: "squash" }, { directory: scratch, number: 12, head_oid: HEAD, base_ref: "main", method: "fast-forward" }, { directory: scratch, number: 12, head_oid: HEAD, method: "squash" }]) {
-      const response = await fetch(`${base}/api/workspace/pr/merge`, { method: "POST", headers: { ...owner, "content-type": "application/json", "x-herdr-machine": "1" }, body: JSON.stringify(body) });
+      const response = await fetch(`${base}/api/workspace/pr/merge`, { method: "POST", headers: access.originHeaders({ "content-type": "application/json", "x-herdr-machine": "1" }), body: JSON.stringify(body) });
       expect([body, response.status]).toEqual([body, 400]);
       expect(((await response.json()) as { error: { code: string } }).error.code).toBe("invalid_body");
     }

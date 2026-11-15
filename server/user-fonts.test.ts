@@ -4,18 +4,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { UserFontList } from "../shared/user-fonts.ts";
+import { testCfAccess, type TestCfFixture } from "./cf-access.fake.ts";
 import { createServer } from "./index.ts";
 import { USER_FONT_MAX_BYTES } from "./user-fonts.ts";
-
-const TOKEN = "user-fonts-token";
 
 describe("GET /api/fonts", () => {
   let root: string;
   let server: ReturnType<typeof createServer>;
+  let access: TestCfFixture;
   const url = (path: string) => `http://127.0.0.1:${server.port}${path}`;
-  const signedIn = (path: string, init: RequestInit = {}) => fetch(url(path), { ...init, headers: { authorization: `Bearer ${TOKEN}` } });
+  const signedIn = (path: string, init: RequestInit = {}) => fetch(url(path), {
+    ...init,
+    headers: access.originHeaders(init.headers as Record<string, string> | undefined),
+  });
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    access = await testCfAccess();
     root = mkdtempSync(join(tmpdir(), "ovis-user-fonts-"));
     const state = join(root, "state");
     const fonts = join(state, "fonts");
@@ -33,7 +37,7 @@ describe("GET /api/fonts", () => {
     // a link could name any file this user may read
     writeFileSync(join(root, "secret.ttf"), "outside the folder");
     if (process.platform !== "win32") symlinkSync(join(root, "secret.ttf"), join(fonts, "Linked.ttf"));
-    server = createServer({ port: 0, hostname: "127.0.0.1", stateDir: state, token: TOKEN, machines: false, sidecar: false, tailscaleOwner: null });
+    server = createServer({ port: 0, hostname: "127.0.0.1", stateDir: state, machines: false, sidecar: false, cfAccess: access.cfAccess });
   });
   afterAll(() => {
     server.stop();
@@ -81,9 +85,9 @@ describe("GET /api/fonts", () => {
 
   it("lists nothing while the folder does not exist", async () => {
     const state = mkdtempSync(join(tmpdir(), "ovis-user-fonts-none-"));
-    const bare = createServer({ port: 0, hostname: "127.0.0.1", stateDir: state, token: TOKEN, machines: false, sidecar: false, tailscaleOwner: null });
+    const bare = createServer({ port: 0, hostname: "127.0.0.1", stateDir: state, machines: false, sidecar: false, cfAccess: access.cfAccess });
     try {
-      const response = await fetch(`http://127.0.0.1:${bare.port}/api/fonts`, { headers: { authorization: `Bearer ${TOKEN}` } });
+      const response = await fetch(`http://127.0.0.1:${bare.port}/api/fonts`, { headers: access.headers() });
       expect(response.status).toBe(200);
       expect(await response.json()).toEqual({ fonts: [] });
     } finally {

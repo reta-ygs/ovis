@@ -41,8 +41,10 @@ afterEach(async () => {
  */
 async function kiroPane(): Promise<{ tui: number; acp: number }> {
   const dir = await mkdtemp(join(home, "pane-"));
-  await writeFile(join(dir, "acp"), "ready\n");
-  await writeFile(join(dir, "chat"), "(exec -a kiro-cli-chat tail acp -f) & wait\n");
+  const node = Bun.which("node");
+  if (!node) throw new Error("node is required for the Kiro process fixture");
+  await writeFile(join(dir, "acp"), 'process.stdout.write("ready\\n"); setInterval(() => {}, 30000);\n');
+  await writeFile(join(dir, "chat"), `(exec -a kiro-cli-chat '${node}' acp) & wait\n`);
   const tui = Bun.spawn(["bash", "chat"], { argv0: "kiro-cli-chat", cwd: dir, stdout: "pipe", stderr: "ignore" });
   standIns.push(tui.pid);
   const reader = tui.stdout.getReader();

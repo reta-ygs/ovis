@@ -3,7 +3,7 @@ import { act, createElement } from "react";
 import { create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 
 import type { Machine } from "../../shared/machines.ts";
-import machinesFixture from "@shared/test-fixtures/machines.json";
+import machinesFixture from "../../shared/test-fixtures/machines.json";
 import { SettingsProvider } from "../lib/settings.ts";
 import type { InboxRailPcs, InboxRailProps } from "./InboxRail.tsx";
 

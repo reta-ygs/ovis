@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,7 @@ import {
   assertLoopbackBindHost,
   createCfAccessVerifier,
   loadCfAccessConfig,
+  scheduleCfAccessExpiry,
   type CfAccessConfig,
 } from "./cf-access.ts";
 import { createServer } from "./index.ts";
@@ -172,7 +174,13 @@ describe("createCfAccessVerifier", () => {
     expect(await verifier.verify(hs256)).toEqual({ ok: false, reason: "unsupported_alg" });
 
     const valid = await signJwt(key1, baseClaims());
-    expect(await verifier.verify(valid)).toEqual({ ok: true, email: OWNER_EMAIL, sub: "user-sub-1" });
+    expect(await verifier.verify(valid)).toEqual({
+      ok: true,
+      email: OWNER_EMAIL,
+      sub: "user-sub-1",
+      exp: nowSec() + 300,
+      expiresAtMs: (nowSec() + 360) * 1000,
+    });
     expect(fetchCalls).toBe(1);
 
     // Tampered payload
@@ -216,7 +224,14 @@ describe("createCfAccessVerifier", () => {
     });
 
     // Cold fetch loads key1; immediately presenting unknown key2 must NOT force another fetch within 60s.
-    expect(await verifier.verify(await signJwt(key1, claim()))).toEqual({ ok: true, email: OWNER_EMAIL, sub: "user-1" });
+    const c1 = claim();
+    expect(await verifier.verify(await signJwt(key1, c1))).toEqual({
+      ok: true,
+      email: OWNER_EMAIL,
+      sub: "user-1",
+      exp: c1.exp,
+      expiresAtMs: (c1.exp + 60) * 1000,
+    });
     expect(fetchCalls).toBe(1);
 
     activeKeys = [key1.publicJwk, key2.publicJwk];
@@ -225,16 +240,37 @@ describe("createCfAccessVerifier", () => {
 
     // After 60s cooldown, unknown kid refreshes JWKS once and accepts key2.
     nowMs += 61_000;
-    expect(await verifier.verify(await signJwt(key2, claim()))).toEqual({ ok: true, email: OWNER_EMAIL, sub: "user-1" });
+    const c2 = claim();
+    expect(await verifier.verify(await signJwt(key2, c2))).toEqual({
+      ok: true,
+      email: OWNER_EMAIL,
+      sub: "user-1",
+      exp: c2.exp,
+      expiresAtMs: (c2.exp + 60) * 1000,
+    });
     expect(fetchCalls).toBe(2);
 
     // Known key within cooldown triggers no extra fetch.
-    expect(await verifier.verify(await signJwt(key1, claim()))).toEqual({ ok: true, email: OWNER_EMAIL, sub: "user-1" });
+    const c3 = claim();
+    expect(await verifier.verify(await signJwt(key1, c3))).toEqual({
+      ok: true,
+      email: OWNER_EMAIL,
+      sub: "user-1",
+      exp: c3.exp,
+      expiresAtMs: (c3.exp + 60) * 1000,
+    });
     expect(fetchCalls).toBe(2);
 
     // After 10m TTL, next verify refreshes JWKS.
     nowMs += 10 * 60_000 + 1;
-    expect(await verifier.verify(await signJwt(key2, claim()))).toEqual({ ok: true, email: OWNER_EMAIL, sub: "user-1" });
+    const c4 = claim();
+    expect(await verifier.verify(await signJwt(key2, c4))).toEqual({
+      ok: true,
+      email: OWNER_EMAIL,
+      sub: "user-1",
+      exp: c4.exp,
+      expiresAtMs: (c4.exp + 60) * 1000,
+    });
     expect(fetchCalls).toBe(3);
   });
 });
@@ -406,5 +442,218 @@ describe("hardened createServer enforcement", () => {
       headers: { "cf-access-jwt-assertion": validJwt },
     });
     expect(pushRes.status).toBe(404);
+  });
+});
+
+describe("CF Access stream expiration and managed IPC health probe", () => {
+  it("chains > 0x7fff_ffff ms delays without overflow and supports clean cancellation", () => {
+    const timers: Array<{ fn: () => void; delay: number; cleared: boolean }> = [];
+    const setSpy = spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, delay?: number) => {
+      const entry = { fn, delay: delay ?? 0, cleared: false };
+      timers.push(entry);
+      return entry as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout);
+    const clearSpy = spyOn(globalThis, "clearTimeout").mockImplementation(((handle?: ReturnType<typeof setTimeout>) => {
+      const entry = handle as unknown as { cleared?: boolean } | undefined;
+      if (entry) entry.cleared = true;
+    }) as typeof clearTimeout);
+    try {
+      let nowMs = 1_000_000;
+      let fired = 0;
+      const stop = scheduleCfAccessExpiry(nowMs + 0x7fff_ffff + 500, () => {
+        fired += 1;
+      }, () => nowMs);
+
+      expect(fired).toBe(0);
+      expect(timers).toHaveLength(1);
+      expect(timers[0]!.delay).toBe(0x7fff_ffff);
+
+      nowMs += 0x7fff_ffff;
+      timers[0]!.fn();
+      expect(fired).toBe(0);
+      expect(timers).toHaveLength(2);
+      expect(timers[1]!.delay).toBe(500);
+
+      nowMs += 500;
+      timers[1]!.fn();
+      expect(fired).toBe(1);
+      stop();
+
+      let cancelledFired = 0;
+      const cancel = scheduleCfAccessExpiry(nowMs + 100, () => {
+        cancelledFired += 1;
+      }, () => nowMs);
+      cancel();
+      expect(timers.at(-1)!.cleared).toBe(true);
+      timers.at(-1)!.fn();
+      expect(cancelledFired).toBe(0);
+    } finally {
+      setSpy.mockRestore();
+      clearSpy.mockRestore();
+    }
+  });
+
+  it("closes upgraded WebSocket connections and /api/machines/events SSE streams when JWT exp + skew passes", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "ovis-cf-expiry-"));
+    const key = await generateRsaKey("exp-kid");
+    const verifier = createCfAccessVerifier(testConfig(), {
+      fetch: async () => Response.json({ keys: [key.publicJwk] }),
+    });
+    const server = createServer({
+      port: 0,
+      hostname: "127.0.0.1",
+      stateDir,
+      system: null,
+      cfAccess: { verifier, publicOrigin: PUBLIC_ORIGIN },
+    });
+    const baseUrl = `http://127.0.0.1:${server.port}`;
+    try {
+      const shortClaims = () => {
+        const nowSec = Date.now() / 1000;
+        return {
+          iss: ISSUER,
+          aud: AUD,
+          email: OWNER_EMAIL,
+          sub: "expiring-owner",
+          iat: Math.floor(nowSec) - 10,
+          exp: nowSec - 60 + 0.25,
+        };
+      };
+      const wsJwt = await signJwt(key, shortClaims());
+      const RuntimeSocket = WebSocket as unknown as new (url: string, options: { headers: Record<string, string> }) => WebSocket;
+      const ws = new RuntimeSocket(`ws://127.0.0.1:${server.port}/ws`, {
+        headers: {
+          "cf-access-jwt-assertion": wsJwt,
+          origin: PUBLIC_ORIGIN,
+        },
+      });
+      const wsOutcome = await new Promise<{ opened: boolean; code: number }>((resolve, reject) => {
+        let opened = false;
+        const deadline = setTimeout(() => reject(new Error("WebSocket did not close on JWT expiry within 5s")), 5_000);
+        ws.addEventListener("open", () => { opened = true; }, { once: true });
+        ws.addEventListener("close", (event) => {
+          clearTimeout(deadline);
+          resolve({ opened, code: event.code });
+        }, { once: true });
+        ws.addEventListener("error", () => {
+          clearTimeout(deadline);
+          reject(new Error("WebSocket errored before closing on JWT expiry"));
+        }, { once: true });
+      });
+      expect(wsOutcome.opened).toBe(true);
+      expect(wsOutcome.code).toBe(1008);
+
+      const sseJwt = await signJwt(key, shortClaims());
+      const sseRes = await fetch(`${baseUrl}/api/machines/events`, {
+        headers: { "cf-access-jwt-assertion": sseJwt },
+      });
+      expect(sseRes.status).toBe(200);
+      expect(sseRes.headers.get("content-type")).toBe("text/event-stream");
+      const reader = sseRes.body!.getReader();
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const ended = await Promise.race([
+          (async () => {
+            while (true) {
+              const { done } = await reader.read();
+              if (done) return "ended" as const;
+            }
+          })(),
+          new Promise<"timeout">((resolve) => {
+            deadline = setTimeout(() => resolve("timeout"), 5_000);
+          }),
+        ]);
+        expect(ended).toBe("ended");
+      } finally {
+        if (deadline !== undefined) clearTimeout(deadline);
+        await reader.cancel().catch(() => undefined);
+      }
+    } finally {
+      server.stop();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("answers managed IPC bridge-health-probe while keeping /api/health?scope=bridge 401 without JWT", async () => {
+    const subStateDir = mkdtempSync(join(tmpdir(), "ovis-managed-ipc-"));
+    const bootId = randomUUID();
+    const ipcAnswers: Array<{ type?: string; boot_id?: string; runtime?: string; runtime_ok?: boolean }> = [];
+    let notifyAnswer: (() => void) | null = null;
+    const child = Bun.spawn([process.execPath, join(import.meta.dir, "index.ts")], {
+      cwd: join(import.meta.dir, ".."),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        HOST: "127.0.0.1",
+        PORT: "0",
+        OVIS_MANAGED: "1",
+        OVIS_BOOT_ID: bootId,
+        OVIS_RUNTIME: "herdr",
+        OVIS_STATE_DIR: subStateDir,
+        HERDR_SOCKET: join(subStateDir, "missing-herdr.sock"),
+        OVIS_CF_ACCESS_TEAM_DOMAIN: TEAM_DOMAIN,
+        OVIS_CF_ACCESS_AUD: AUD,
+        OVIS_CF_ACCESS_ALLOWED_EMAILS: OWNER_EMAIL,
+        OVIS_PUBLIC_ORIGIN: PUBLIC_ORIGIN,
+      },
+      ipc(message) {
+        if (message && typeof message === "object" && (message as { type?: unknown }).type === "bridge-health-answer") {
+          ipcAnswers.push(message as { type?: string; boot_id?: string; runtime?: string; runtime_ok?: boolean });
+          notifyAnswer?.();
+          notifyAnswer = null;
+        }
+      },
+    });
+    try {
+      const reader = child.stdout.getReader();
+      const decoder = new TextDecoder();
+      let output = "";
+      let port: number | null = null;
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline && port === null) {
+        const readPromise = reader.read();
+        const chunk = await Promise.race([
+          readPromise,
+          new Promise<{ done: true; value: undefined }>((resolve) =>
+            setTimeout(() => resolve({ done: true, value: undefined }), Math.max(1, deadline - Date.now()))),
+        ]);
+        if (chunk.value) {
+          output += decoder.decode(chunk.value, { stream: true });
+          const match = /Ovis listening on http:\/\/127\.0\.0\.1:(\d+)/.exec(output);
+          if (match) port = Number(match[1]);
+        }
+        if (chunk.done) break;
+      }
+      reader.releaseLock();
+      expect(port).not.toBeNull();
+
+      const answered = new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("Timed out waiting for bridge-health-answer IPC")), 5_000);
+        notifyAnswer = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+      });
+      child.send({ type: "bridge-health-probe" });
+      await answered;
+
+      expect(ipcAnswers).toEqual([
+        {
+          type: "bridge-health-answer",
+          boot_id: bootId,
+          runtime: "herdr",
+          runtime_ok: false,
+        },
+      ]);
+
+      const unauthBridgeHealth = await fetch(`http://127.0.0.1:${port}/api/health?scope=bridge`);
+      expect(unauthBridgeHealth.status).toBe(401);
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited.catch(() => undefined);
+      rmSync(subStateDir, { recursive: true, force: true });
+    }
   });
 });

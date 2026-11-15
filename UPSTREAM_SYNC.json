@@ -1,5 +1,26 @@
 {
   "upstreamRepo": "devswha/ovis",
   "upstreamBranch": "main",
-  "syncedCommit": "e2349be52c2b30f0a6c5fde12289c9586e2ff236"
+  "upstreamCommit": "e2349be52c2b30f0a6c5fde12289c9586e2ff236",
+  "syncedCommit": "e2349be52c2b30f0a6c5fde12289c9586e2ff236",
+  "forkRepo": "git@github.com:reta-ygs/ovis.git",
+  "deletedPaths": [
+    ".github",
+    "app",
+    "crates/ovis-tui",
+    "install.ps1",
+    "install.sh",
+    "ovis-site",
+    "push-relay",
+    "relay",
+    "site",
+    "telemetry"
+  ],
+  "securityInvariants": [
+    "Bind HTTP/WS server strictly to 127.0.0.1 loopback (reject wildcard, LAN, and Tailscale binds).",
+    "Require mandatory fail-closed Cloudflare Access RS256 Cf-Access-Jwt-Assertion verification against teamDomain, aud, and allowedEmails on HTTP, SSE, WebSocket, and static routes; no OVIS_TOKEN fallback.",
+    "Enforce OVIS_PUBLIC_ORIGIN on HTML/static responses, mutations, and WebSocket upgrades.",
+    "Bound admitted WebSocket and SSE connection lifetimes to verified JWT expiry/recheck hooks.",
+    "Keep OVIS_ACCOUNT_SERVICE_URL=off, OVIS_AUTO_UPDATE=0, relay/push-relay, and tailnet identity lookup disabled."
+  ]
 }

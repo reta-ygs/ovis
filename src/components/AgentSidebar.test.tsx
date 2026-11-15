@@ -4,7 +4,7 @@ import { create, type ReactTestRenderer } from "react-test-renderer";
 
 import type { Machine } from "../../shared/machines.ts";
 import type { AgentStatus } from "../../shared/protocol.ts";
-import machinesFixture from "../../site/demo/fixtures/machines.json";
+import machinesFixture from "../../shared/test-fixtures/machines.json";
 import { currentAgentRowTokens, setAgentRowTokens } from "../lib/agentRowTokens.ts";
 import { SettingsProvider } from "../lib/settings.ts";
 import { SidebarActivityProvider, useSidebarActivity } from "../lib/sidebarActivity.tsx";

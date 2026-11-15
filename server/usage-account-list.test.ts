@@ -5,11 +5,13 @@ import { join } from "node:path";
 import type { UsageLoginFollowed, UsageLoginPrompt } from "../shared/usage-login.ts";
 import type { UsageReport } from "../shared/protocol.ts";
 import { createServer } from "./index.ts";
+import { testCfAccess } from "./cf-access.fake.ts";
 import { DEVICE_COOKIE } from "./auth.ts";
 import { DeviceStore } from "./devices.ts";
 import { UsageLoginService } from "./usage-login.ts";
 import { FRESH_MS, UsageService, USAGE_PROVIDERS, type UsageContext, type UsageProvider } from "./usage.ts";
 
+const access = testCfAccess();
 const roots: string[] = [];
 const servers: ReturnType<typeof createServer>[] = [];
 afterEach(() => {
@@ -52,6 +54,7 @@ for await (const code of console) {
     const server = createServer({
       port: 0, hostname: "127.0.0.1", token, stateDir: join(root, "state"),
       machines: false, registerBridge: false, sidecar: false, terminalAttach: false,
+      cfAccess: access.cfAccess,
       herdrConfigPath: join(root, "herdr.toml"),
       usage: new UsageService(ctx, USAGE_PROVIDERS.filter((provider) => provider.id === "claude")),
       usageLogin: login,
@@ -68,25 +71,25 @@ it("removes only the selected account across a server restart without changing C
   const before = credentials.map((path) => readFileSync(path, "utf8"));
   const first = start();
   const removed = await fetch(`${first.origin}/api/usage/accounts`, {
-    method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ account: "claude:expired" }),
+    method: "DELETE", headers: access.originHeaders({ "content-type": "application/json" }), body: JSON.stringify({ account: "claude:expired" }),
   });
   expect(removed.status).toBe(204);
   first.server.stop();
   servers.splice(servers.indexOf(first.server), 1);
   const second = start();
-  const report = await (await fetch(`${second.origin}/api/usage`)).json();
+  const report = await (await fetch(`${second.origin}/api/usage`, { headers: access.headers() })).json();
   expect(report.providers.map((entry: { key: string }) => entry.key).sort()).toEqual(["claude:home", "claude:work"]);
   expect(credentials.map((path) => readFileSync(path, "utf8"))).toEqual(before);
 });
 
 async function completeLogin(host: ReturnType<ReturnType<typeof fixture>["start"]>, body: object, code: string) {
   const started = await fetch(`${host.origin}/api/usage/login`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...body, follow: true }),
+    method: "POST", headers: access.originHeaders({ "content-type": "application/json" }), body: JSON.stringify({ ...body, follow: true }),
   });
   expect(started.status).toBe(200);
   const { login_id: id }: UsageLoginFollowed = await started.json();
   const cookie = started.headers.get("set-cookie")?.split(";")[0] ?? "";
-  const prompt = async (): Promise<UsageLoginPrompt> => (await fetch(`${host.origin}/api/usage/login/prompt?login=${id}`, { headers: { cookie } })).json();
+  const prompt = async (): Promise<UsageLoginPrompt> => (await fetch(`${host.origin}/api/usage/login/prompt?login=${id}`, { headers: access.headers({ cookie }) })).json();
   for (;;) {
     const changed = host.login.changed(id);
     const current = await prompt();
@@ -96,7 +99,7 @@ async function completeLogin(host: ReturnType<ReturnType<typeof fixture>["start"
   }
   const ended = host.login.settled(id);
   const response = await fetch(`${host.origin}/api/usage/login/code`, {
-    method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ login: id, code }),
+    method: "POST", headers: access.originHeaders({ "content-type": "application/json", cookie }), body: JSON.stringify({ login: id, code }),
   });
   expect(response.status).toBe(204);
   await ended;
@@ -109,7 +112,7 @@ it("re-authenticates the expired account in its own home and reports it signed i
   const other = readFileSync(join(root, ".claude-work", ".credentials.json"), "utf8");
   const result = await completeLogin(host, { provider: "claude", account: "claude:expired" }, "success");
   expect(result.succeeded).toBe(true);
-  const report: UsageReport = await (await fetch(`${host.origin}/api/usage`)).json();
+  const report: UsageReport = await (await fetch(`${host.origin}/api/usage`, { headers: access.headers() })).json();
   expect(report.providers.find((account) => account.key === "claude:expired")?.problem).toBeNull();
   expect(readFileSync(join(root, ".claude-work", ".credentials.json"), "utf8")).toBe(other);
 });
@@ -117,7 +120,7 @@ it("re-authenticates the expired account in its own home and reports it signed i
 it("adds a signed-in account after the new home's login completes", async () => {
   const host = fixture().start();
   await completeLogin(host, { provider: "claude", name: "added" }, "success");
-  const report: UsageReport = await (await fetch(`${host.origin}/api/usage`)).json();
+  const report: UsageReport = await (await fetch(`${host.origin}/api/usage`, { headers: access.headers() })).json();
   expect(report.providers.find((account) => account.key === "claude:added")).toMatchObject({ account: "added@example.test", problem: null });
 });
 
@@ -131,11 +134,11 @@ it("restores only the removed account whose explicit sign-in succeeds", async ()
   const host = fixture().start();
   for (const account of ["claude:expired", "claude:work"]) {
     expect((await fetch(`${host.origin}/api/usage/accounts`, {
-      method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ account }),
+      method: "DELETE", headers: access.originHeaders({ "content-type": "application/json" }), body: JSON.stringify({ account }),
     })).status).toBe(204);
   }
   await completeLogin(host, { provider: "claude", account: "claude:expired" }, "success");
-  const report: UsageReport = await (await fetch(`${host.origin}/api/usage`)).json();
+  const report: UsageReport = await (await fetch(`${host.origin}/api/usage`, { headers: access.headers() })).json();
   expect(report.providers.map((account) => account.key).sort()).toEqual(["claude:expired", "claude:home"]);
 });
 
@@ -144,16 +147,16 @@ it("keeps the selected account order after restarting the server", async () => {
   const first = start();
   const order = ["claude:work", "claude:expired", "claude:home"];
   const saved = await fetch(`${first.origin}/api/preferences`, {
-    method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ settings: { usageOrder: order } }),
+    method: "PUT", headers: access.originHeaders({ "content-type": "application/json" }), body: JSON.stringify({ settings: { usageOrder: order } }),
   });
   expect(saved.status).toBe(200);
   first.server.stop();
   servers.splice(servers.indexOf(first.server), 1);
   const second = start();
-  expect((await (await fetch(`${second.origin}/api/preferences`)).json()).settings.usageOrder).toEqual(order);
+  expect((await (await fetch(`${second.origin}/api/preferences`, { headers: access.headers() })).json()).settings.usageOrder).toEqual(order);
 });
 
-it("refuses account removal from a watching device", async () => {
+it("refuses account removal with only a paired device cookie when Cloudflare Access JWT is absent", async () => {
   const { root, start } = fixture();
   const devices = new DeviceStore(join(root, "state"));
   const paired = devices.pair(devices.startPairing().code, "Watcher", "watch");
@@ -161,10 +164,10 @@ it("refuses account removal from a watching device", async () => {
   devices.match(paired.token);
   const host = start("fixture-owner");
   const response = await fetch(`${host.origin}/api/usage/accounts`, {
-    method: "DELETE", headers: { "content-type": "application/json", cookie: `${DEVICE_COOKIE}=${paired.token}` },
+    method: "DELETE", headers: { "content-type": "application/json", origin: access.publicOrigin, cookie: `${DEVICE_COOKIE}=${paired.token}` },
     body: JSON.stringify({ account: "claude:expired" }),
   });
-  expect(response.status).toBe(403);
+  expect(response.status).toBe(401);
 });
 
 const keys = (report: UsageReport | { providers?: readonly { key: string }[] } | undefined) => (report?.providers ?? []).map((entry) => entry.key).sort();
@@ -172,14 +175,14 @@ const keys = (report: UsageReport | { providers?: readonly { key: string }[] } |
 it("lists a removed account under removed, and POST lists it again", async () => {
   const host = fixture().start();
   const account = (method: string) => fetch(`${host.origin}/api/usage/accounts`, {
-    method, headers: { "content-type": "application/json" }, body: JSON.stringify({ account: "claude:work" }),
+    method, headers: access.originHeaders({ "content-type": "application/json" }), body: JSON.stringify({ account: "claude:work" }),
   });
   expect((await account("DELETE")).status).toBe(204);
-  const hidden: UsageReport = await (await fetch(`${host.origin}/api/usage`)).json();
+  const hidden: UsageReport = await (await fetch(`${host.origin}/api/usage`, { headers: access.headers() })).json();
   expect(keys(hidden)).toEqual(["claude:expired", "claude:home"]);
   expect(hidden.removed?.map((entry) => entry.key)).toEqual(["claude:work"]);
   expect((await account("POST")).status).toBe(204);
-  const restored: UsageReport = await (await fetch(`${host.origin}/api/usage`)).json();
+  const restored: UsageReport = await (await fetch(`${host.origin}/api/usage`, { headers: access.headers() })).json();
   expect(keys(restored)).toEqual(["claude:expired", "claude:home", "claude:work"]);
   expect(restored.removed).toBeUndefined();
 });
@@ -190,14 +193,14 @@ it("sets a damaged removed-accounts list aside instead of failing the usage repo
   mkdirSync(state, { recursive: true });
   writeFileSync(join(state, "usage-removed.json"), "{not json");
   const host = start();
-  const response = await fetch(`${host.origin}/api/usage`);
+  const response = await fetch(`${host.origin}/api/usage`, { headers: access.headers() });
   expect(response.status).toBe(200);
   expect(keys(await response.json())).toEqual(["claude:expired", "claude:home", "claude:work"]);
   expect(readdirSync(state).filter((name) => name.startsWith("usage-removed.json.corrupt-"))).toHaveLength(1);
   expect((await fetch(`${host.origin}/api/usage/accounts`, {
-    method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ account: "claude:work" }),
+    method: "DELETE", headers: access.originHeaders({ "content-type": "application/json" }), body: JSON.stringify({ account: "claude:work" }),
   })).status).toBe(204);
-  expect(keys(await (await fetch(`${host.origin}/api/usage`)).json())).toEqual(["claude:expired", "claude:home"]);
+  expect(keys(await (await fetch(`${host.origin}/api/usage`, { headers: access.headers() })).json())).toEqual(["claude:expired", "claude:home"]);
 });
 
 it("stops looking up a provider's sign-ins once its accounts are hidden in Settings or removed from Ovis", async () => {
@@ -221,17 +224,18 @@ it("stops looking up a provider's sign-ins once its accounts are hidden in Setti
   const server = createServer({
     port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "state"),
     machines: false, registerBridge: false, sidecar: false, terminalAttach: false,
+    cfAccess: access.cfAccess,
     herdrConfigPath: join(root, "herdr.toml"), usage: new UsageService(ctx, [copilot]),
   });
   servers.push(server);
   const origin = `http://127.0.0.1:${server.port}`;
-  const json = { "content-type": "application/json" };
-  expect((await fetch(`${origin}/api/usage`)).status).toBe(200);
+  const json = access.originHeaders({ "content-type": "application/json" });
+  expect((await fetch(`${origin}/api/usage`, { headers: access.headers() })).status).toBe(200);
   expect((await fetch(`${origin}/api/usage/accounts`, { method: "DELETE", headers: json, body: JSON.stringify({ account: "copilot:gone" }) })).status).toBe(204);
   expect((await fetch(`${origin}/api/preferences`, { method: "PUT", headers: json, body: JSON.stringify({ settings: { usageHidden: ["copilot:kept"] } }) })).status).toBe(200);
   const before = searches;
   now += FRESH_MS;
-  const report: UsageReport = await (await fetch(`${origin}/api/usage?refresh=1`)).json();
+  const report: UsageReport = await (await fetch(`${origin}/api/usage?refresh=1`, { headers: access.headers() })).json();
   expect(searches).toBe(before);
   expect([report.providers.map((usage) => usage.key), report.removed?.map((usage) => usage.key)]).toEqual([["copilot:kept"], ["copilot:gone"]]);
 });
@@ -259,11 +263,12 @@ it("reads usage after a Settings change only with Plan limits on, and only once 
   const server = createServer({
     port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "state"),
     machines: false, registerBridge: false, sidecar: false, terminalAttach: false,
+    cfAccess: access.cfAccess,
     herdrConfigPath: join(root, "herdr.toml"), usage: new UsageService(ctx, [copilot]),
   });
   servers.push(server);
   const origin = `http://127.0.0.1:${server.port}`;
-  const share = (settings: Record<string, unknown>) => fetch(`${origin}/api/preferences`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ settings }) });
+  const share = (settings: Record<string, unknown>) => fetch(`${origin}/api/preferences`, { method: "PUT", headers: access.originHeaders({ "content-type": "application/json" }), body: JSON.stringify({ settings }) });
   // Plan limits off: no change of the hidden accounts reads anything
   expect((await share({ showUsage: false })).status).toBe(200);
   expect((await share({ usageHidden: ["copilot:a"] })).status).toBe(200);
@@ -271,7 +276,7 @@ it("reads usage after a Settings change only with Plan limits on, and only once 
   expect(searches).toBe(0);
   // Plan limits on: hiding one reads nothing, showing it again reads at once
   expect((await share({ showUsage: true })).status).toBe(200);
-  expect((await fetch(`${origin}/api/usage`)).status).toBe(200);
+  expect((await fetch(`${origin}/api/usage`, { headers: access.headers() })).status).toBe(200);
   expect(searches).toBe(1);
   now += FRESH_MS;
   expect((await share({ usageHidden: ["copilot:a"] })).status).toBe(200);

@@ -7,7 +7,7 @@ import { handleIntegrationsRequest } from "./integrations-routes.ts";
 import type { OrderSequence } from "./order-sequence.ts";
 import type { DevicePairedEvent, DeviceRemovedEvent, HealthAuth, RelayPairingsEvent, RemoteAccess, RemotePairingsEvent, SecuritySummary, SessionSnapshot } from "../shared/protocol.ts";
 import { bindScope, cameThroughProxy, isLoopbackAddress, type Access } from "./access.ts";
-import type { CfAccessVerifier } from "./cf-access.ts";
+import { scheduleCfAccessExpiry, type CfAccessVerifier } from "./cf-access.ts";
 import type { DeviceMatch, DeviceStore } from "./devices.ts";
 import { handlePreferencesRequest, type PreferenceStore } from "./preferences.ts";
 import { handleSeenRequest, type SeenStore } from "./seen.ts";
@@ -233,7 +233,19 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
         listener({ type: "relay-pairings", pairings: [] });
         return () => {};
       } };
-      const response = await handleMachineRequest(request, machines, undefined, preferences, readOnly, herdrSidebar, seen, pairings, ctx.relayBodyBudget, true, publicOrigin);
+      const response = await handleMachineRequest(
+        request,
+        machines,
+        pathname === "/api/machines/events" ? (end) => scheduleCfAccessExpiry(verified.expiresAtMs, end) : undefined,
+        preferences,
+        readOnly,
+        herdrSidebar,
+        seen,
+        pairings,
+        ctx.relayBodyBudget,
+        true,
+        publicOrigin,
+      );
       response.headers.set("cache-control", "no-store");
       return response;
     }
@@ -253,7 +265,15 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
         return () => {};
       } },
     } : undefined;
-    const upgraded = ctx.upgrade(request, { headers, data: connectionData({ machineEvents, deviceId: undefined, readOnly }) });
+    const upgraded = ctx.upgrade(request, {
+      headers,
+      data: connectionData({
+        machineEvents,
+        deviceId: undefined,
+        readOnly,
+        watchAccessExpiry: (close) => scheduleCfAccessExpiry(verified.expiresAtMs, close),
+      }),
+    });
     if (upgraded) return undefined;
     return new Response("websocket upgrade required", { status: 426 });
   }

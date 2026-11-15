@@ -75,9 +75,6 @@ export async function runSupervisor(root = ROOT) {
   root = resolve(root);
   // as the server reads it (server/index.ts): an empty PORT is the default, and both name the same saved runtime file
   const port = Number(process.env["PORT"] || DEFAULT_PORT);
-  const host = process.env["HOST"] ?? "127.0.0.1";
-  const probeHost = host === "0.0.0.0" ? "127.0.0.1" : host === "::" ? "[::1]" : host.includes(":") ? `[${host}]` : host;
-  const origin = `http://${probeHost}:${port}`;
   // a launcher from before the rename finds its releases only under the old state dir: the move
   // waits for a launcher of this version
   const legacyStateDir = legacyLauncherStateDir(process.env);
@@ -127,6 +124,8 @@ export async function runSupervisor(root = ROOT) {
     const bootId = crypto.randomUUID();
     // OVIS_RUNTIME_SWITCH: this launcher restarts the bridge on a runtime chosen in Settings (restartForRuntime)
     const settings = { OVIS_MANAGED: "1", OVIS_RUNTIME_SWITCH: "1", OVIS_BOOT_ID: bootId, OVIS_STATE_DIR: appStateDir, OVIS_REVISION: release?.revision ?? "" };
+    let healthAnswer: { boot_id?: string; runtime?: string; runtime_ok?: boolean } | null = null;
+    let wakeProbe: (() => void) | null = null;
     // from source the path is relative to the release it runs in (its cwd), as the bridge's argv always was
     const candidate = Bun.spawn(COMPILED ? entryCommand("serve") : [process.execPath, ENTRIES.serve], {
       cwd: release?.directory ?? root, windowsHide: true, stdin: "ignore", stdout: "inherit", stderr: "inherit",
@@ -135,6 +134,11 @@ export async function runSupervisor(root = ROOT) {
       env: { ...process.env, ...(legacyStateDir === null ? settings : withLegacyNames(settings)), HERDR_SOCKET: socketPath },
       ipc(message) {
         if (message?.type === "update-status-request") publish();
+        if (message?.type === "bridge-health-answer" && typeof message.boot_id === "string" && message.boot_id === bootId) {
+          healthAnswer = message as { boot_id?: string; runtime?: string; runtime_ok?: boolean };
+          wakeProbe?.();
+          wakeProbe = null;
+        }
         // Settings saved another runtime (server/herdr-core/runtime-choice.ts): the bridge starts again on it
         if (message?.type === "runtime-restart" && typeof message.id === "string") {
           const id: string = message.id;
@@ -165,28 +169,37 @@ export async function runSupervisor(root = ROOT) {
     });
     child = candidate;
     const deadline = Date.now() + 20_000;
-    const ours = (body: { web_ui?: { boot_id?: string } }) => body.web_ui?.boot_id === bootId;
     while (Date.now() < deadline && !stopping && candidate.exitCode === null) {
+      healthAnswer = null;
+      let finish = () => {};
+      const answered = new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+          if (wakeProbe === finish) wakeProbe = null;
+          resolve();
+        }, 200);
+        finish = () => {
+          clearTimeout(timer);
+          if (wakeProbe === finish) wakeProbe = null;
+          resolve();
+        };
+        wakeProbe = finish;
+      });
       try {
-        const bridge = await fetch(`${origin}/api/health?scope=bridge`, { signal: AbortSignal.timeout(1000) });
-        const own = await bridge.json() as { web_ui?: { boot_id?: string }; runtime?: string };
-        // a bridge from before its own answer carried the boot id (an older checkout a release falls back
-        // to): the whole health answer is the only check it can pass, as it always was
-        const older = bridge.ok && own.web_ui === undefined;
-        if (older || bridge.ok && ours(own)) {
-          // only herdr's TUI may be stopped at a good start: a runtime the bridge started itself, any other, must answer
-          let ready = !older && (own.runtime === undefined || own.runtime === "herdr") && !await herdrMayListen(socketPath);
-          if (!ready) {
-            const response = await fetch(`${origin}/api/health`, { signal: AbortSignal.timeout(1000) });
-            ready = response.ok && ours(await response.json() as { web_ui?: { boot_id?: string } });
-          }
-          if (ready) {
-            try { candidate.send({ type: "bridge-accepted" }); } catch { /* it reads as not taken, and a page waits on */ }
-            publish();
-            return;
-          }
+        candidate.send({ type: "bridge-health-probe" });
+      } catch {
+        finish();
+      }
+      await answered;
+      const answer = healthAnswer as { boot_id?: string; runtime?: string; runtime_ok?: boolean } | null;
+      if (answer?.boot_id === bootId) {
+        // only herdr's TUI may be stopped at a good start: a runtime the bridge started itself, any other, must answer
+        const ready = answer.runtime_ok === true || ((answer.runtime === undefined || answer.runtime === "herdr") && !(await herdrMayListen(socketPath)));
+        if (ready) {
+          try { candidate.send({ type: "bridge-accepted" }); } catch { /* it reads as not taken, and a page waits on */ }
+          publish();
+          return;
         }
-      } catch { /* wait for this exact bridge, never mistake another port owner for it */ }
+      }
       await Bun.sleep(100);
     }
     await stopChild();

@@ -4,17 +4,18 @@ import { request as httpRequest } from "node:http";
 import { createServer as createSocketServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { testCfAccess } from "./cf-access.fake.ts";
 import { createServer } from "./index.ts";
 import { forgetTranscriptState } from "./conversation.ts";
 import { socketAddress } from "./herdr/client.ts";
 
 /** One HTTP attempt. Some fetch implementations retry a socket Bun closed before its response. */
-function request(base: string, path: string, payload?: object): Promise<{ status: number; body: any }> {
+function request(base: string, path: string, cfHeaders: Record<string, string>, payload?: object): Promise<{ status: number; body: any }> {
   return new Promise((resolve, reject) => {
     const body = payload === undefined ? undefined : JSON.stringify(payload);
     const req = httpRequest(base + path, {
       agent: false, method: body === undefined ? "GET" : "POST",
-      headers: { origin: base, "x-herdr-machine": "1", ...(body === undefined ? {} : { "content-type": "application/json", "content-length": Buffer.byteLength(body).toString() }) },
+      headers: { ...cfHeaders, "x-herdr-machine": "1", ...(body === undefined ? {} : { "content-type": "application/json", "content-length": Buffer.byteLength(body).toString() }) },
     }, (response) => {
       let text = "";
       response.setEncoding("utf8");
@@ -78,16 +79,18 @@ it("returns results and bounded RPC errors after sequential reads exceed HTTP in
   });
   let app: ReturnType<typeof createServer> | undefined;
   try {
+    const access = await testCfAccess();
     await new Promise<void>((resolve, reject) => { daemon.once("error", reject); daemon.listen(socketAddress(socketPath), resolve); });
     process.env.HERDR_SOCKET = socketPath;
     forgetTranscriptState();
-    app = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "state"), herdrProfiles: async () => [], registerBridge: false, tailscaleOwner: null });
+    app = createServer({ port: 0, hostname: "127.0.0.1", stateDir: join(root, "state"), herdrProfiles: async () => [], registerBridge: false, cfAccess: access.cfAccess });
     const base = `http://127.0.0.1:${app.port}`;
+    const cfHeaders = access.originHeaders();
     const [commands, aliasCommands, failure, aliasFailure] = await Promise.all([
-      request(base, "/api/pane/commands?pane_id=fixture"),
-      request(base, "/api/machines/local/pane/commands?pane_id=fixture"),
-      request(base, "/api/worktree/open", { workspace_id: "fixture-source", branch: "fixture" }),
-      request(base, "/api/machines/local/worktree/open", { workspace_id: "fixture-source", branch: "fixture" }),
+      request(base, "/api/pane/commands?pane_id=fixture", cfHeaders),
+      request(base, "/api/machines/local/pane/commands?pane_id=fixture", cfHeaders),
+      request(base, "/api/worktree/open", cfHeaders, { workspace_id: "fixture-source", branch: "fixture" }),
+      request(base, "/api/machines/local/worktree/open", cfHeaders, { workspace_id: "fixture-source", branch: "fixture" }),
     ]);
     expect(commands).toEqual({ status: 200, body: { commands: [] } });
     expect(aliasCommands).toEqual(commands);

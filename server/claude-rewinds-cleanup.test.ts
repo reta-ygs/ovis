@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { testCfAccess } from "./cf-access.fake.ts";
 import { createServer } from "./index.ts";
 
 let stateDir: string;
@@ -14,18 +15,20 @@ afterEach(() => {
   rmSync(stateDir, { recursive: true, force: true });
 });
 
-it("removes the Chat rewind record a pre-release build left in the state directory, keeping the rest", () => {
+it("removes the Chat rewind record a pre-release build left in the state directory, keeping the rest", async () => {
+  const access = await testCfAccess();
   stateDir = mkdtempSync(join(tmpdir(), "ovis-claude-rewinds-"));
   writeFileSync(join(stateDir, "claude-rewinds.json"), JSON.stringify({ "/fixture/session.jsonl": { pid: 4242, paneId: "p1", restored: "apple" } }));
   writeFileSync(join(stateDir, "keep.json"), "{}");
-  server = createServer({ port: 0, hostname: "127.0.0.1", stateDir, token: "", machines: false, sidecar: false });
+  server = createServer({ port: 0, hostname: "127.0.0.1", stateDir, machines: false, sidecar: false, cfAccess: access.cfAccess });
   expect(existsSync(join(stateDir, "claude-rewinds.json"))).toBe(false);
   expect(readFileSync(join(stateDir, "keep.json"), "utf8")).toBe("{}");
 });
 
-it("starts as before when there is no such record", () => {
+it("starts as before when there is no such record", async () => {
+  const access = await testCfAccess();
   stateDir = mkdtempSync(join(tmpdir(), "ovis-claude-rewinds-"));
-  server = createServer({ port: 0, hostname: "127.0.0.1", stateDir, token: "", machines: false, sidecar: false });
+  server = createServer({ port: 0, hostname: "127.0.0.1", stateDir, machines: false, sidecar: false, cfAccess: access.cfAccess });
   expect(server.port).toBeGreaterThan(0);
   expect(existsSync(join(stateDir, "claude-rewinds.json"))).toBe(false);
 });

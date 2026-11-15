@@ -17,7 +17,7 @@
     "start": "bun run build && bun run server/managed.ts",
     "typecheck": "bun scripts/typecheck.ts",
     "check": "bun scripts/check.ts",
-    "test": "bun test",
+    "test": "bun scripts/ci-tests.ts unit",
     "test:unit": "bun scripts/ci-tests.ts unit",
     "test:integration": "bun scripts/ci-tests.ts integration",
     "test:ui": "bun run build && bun scripts/ui-regression.ts && bun scripts/ui-contexts-regression.ts && bun scripts/ui-contexts-layout-regression.ts && bun scripts/sticky-modifiers-regression.ts",
@@ -26,7 +26,6 @@
     "generate:case-folding": "bun run scripts/generate-case-folding.ts",
     "generate:confusables": "bun run scripts/generate-confusables.ts",
     "build:remote": "bun run scripts/build-remote-bundle.ts",
-    "build:site": "bun scripts/build-site.ts",
     "test:ssh": "bun run scripts/ssh-integration.ts"
   },
   "dependencies": {

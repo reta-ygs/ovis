@@ -2,12 +2,21 @@ import { afterEach, expect, it, jest, mock, spyOn } from "bun:test";
 import { chmodSync, closeSync, constants, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import * as client from "./herdr/client.ts";
 import { isGjcProcess } from "./gjc-runtime.ts";
 import { catalogLocator } from "./agent-catalog-detect.ts";
 import { agentPathProbe, loginPathProbe, paneShell, parseLoginPath, powershellNativeArgs, shellAgentExecutable, ShellAgentLocator, shellCommandLine, startShellAgent, type LoginPathProbe, type LoginPathResult } from "./shell-agent.ts";
 import { descendantArgv, descendantProcesses, parseProcessTable, windowsArgv, windowsProcessTable } from "./windows-processes.ts";
+
+const SYSTEM_BINS = [...new Set([
+  ...["printenv", "sleep", "mkfifo", "setsid", "yes", "head", "tr", "ps"]
+    .map((cmd) => Bun.which(cmd))
+    .filter((binPath): binPath is string => Boolean(binPath))
+    .map((binPath) => dirname(binPath)),
+  "/usr/bin",
+  "/bin",
+])].join(":");
 
 it("tells a pane's shell from the program herdr reports in front", () => {
   expect(paneShell("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe")).toBe("powershell");
@@ -139,7 +148,7 @@ function fixture(profile = "echo 'Welcome to the fixture shell'") {
   const shell = join(root, "login-shell");
   writeFileSync(shell, [
     "#!/bin/sh",
-    `if [ "$1" = "-l" ]; then PATH='${loginBin}:/usr/bin:/bin'; export PATH; shift; ${profile}; fi`,
+    `if [ "$1" = "-l" ]; then PATH='${loginBin}:${SYSTEM_BINS}'; export PATH; shift; ${profile}; fi`,
     '[ "$1" = "-c" ] && exec /bin/sh -c "$2"',
     "exit 64",
     "",
@@ -218,7 +227,7 @@ function rcFixture(rc = ":") {
   const shell = join(f.root, "interactive-shell");
   writeFileSync(shell, [
     "#!/bin/sh",
-    "PATH=/usr/bin:/bin",
+    `PATH=${SYSTEM_BINS}`,
     'while :; do case "$1" in -l) PATH="' + f.loginBin + ':$PATH"; shift;; -i) ' + rc + '; PATH="' + rcBin + ':$PATH"; shift;; *) break;; esac; done',
     "export PATH",
     '[ "$1" = "-c" ] && exec /bin/sh -c "$2"',
@@ -232,11 +241,11 @@ it("finds an agent a pane's interactive shell puts on PATH (zsh's .zshrc), and k
   const f = rcFixture();
   // the login shell alone misses it: what hid Claude Code from the desktop app's agent list on a Mac
   expect(await new ShellAgentLocator({ platform: "linux", servicePath: f.servicePath, probe: loginPathProbe({ shell: f.shell, env: f.env }) }).executable("gjc")).toBeNull();
-  expect(await once(agentPathProbe({ shell: f.shell, env: f.env }))).toEqual({ path: `${f.rcBin}:${f.loginBin}:/usr/bin:/bin` });
+  expect(await once(agentPathProbe({ shell: f.shell, env: f.env }))).toEqual({ path: `${f.rcBin}:${f.loginBin}:${SYSTEM_BINS}` });
   expect(await new ShellAgentLocator({ platform: "linux", servicePath: f.servicePath, probe: agentPathProbe({ shell: f.shell, env: f.env }) }).executable("gjc")).toBe(f.gjc);
   // a shell whose interactive run fails still answers with its login PATH
   const plain = fixture();
-  expect(await once(agentPathProbe({ shell: plain.shell, env: plain.env }))).toEqual({ path: `${plain.loginBin}:/usr/bin:/bin` });
+  expect(await once(agentPathProbe({ shell: plain.shell, env: plain.env }))).toEqual({ path: `${plain.loginBin}:${SYSTEM_BINS}` });
   // and one that fails both ways says why
   const failing = fixture("exit 3");
   const failed = await once(agentPathProbe({ shell: failing.shell, env: failing.env }));
@@ -250,7 +259,7 @@ it("runs the interactive shell once until asked to read it again, with the marke
   const runs = () => existsSync(join(f.home, "rc-runs")) ? readFileSync(join(f.home, "rc-runs"), "utf8").split("\n").filter(Boolean) : [];
   const probe = agentPathProbe({ shell: f.shell, env: f.env, rereadGapMs: 0 });
   await Promise.all([once(probe), once(probe)]);
-  expect(await once(probe)).toEqual({ path: `${f.rcBin}:${f.loginBin}:/usr/bin:/bin` });
+  expect(await once(probe)).toEqual({ path: `${f.rcBin}:${f.loginBin}:${SYSTEM_BINS}` });
   expect(runs()).toEqual(["x1"]);
   probe.reread();
   await once(probe);
@@ -280,11 +289,11 @@ it("an interactive shell that outruns its time leaves the login PATH, is not run
   const warn = spyOn(console, "warn").mockImplementation(() => undefined);
   try {
     const probe = agentPathProbe({ shell: f.shell, env: f.env, timeoutMs: 300 });
-    expect(await once(probe)).toEqual({ path: `${f.loginBin}:/usr/bin:/bin` });
+    expect(await once(probe)).toEqual({ path: `${f.loginBin}:${SYSTEM_BINS}` });
     expect(probe.problem()).toContain("timed out after 300 ms");
     // kept: the next lookups do not run (and wait on) it again, and it is logged once
-    expect(await once(probe)).toEqual({ path: `${f.loginBin}:/usr/bin:/bin` });
-    expect(await once(probe)).toEqual({ path: `${f.loginBin}:/usr/bin:/bin` });
+    expect(await once(probe)).toEqual({ path: `${f.loginBin}:${SYSTEM_BINS}` });
+    expect(await once(probe)).toEqual({ path: `${f.loginBin}:${SYSTEM_BINS}` });
     expect(runs()).toBe(1);
     expect(warn.mock.calls.filter(([line]) => String(line).includes("interactive shell PATH not read"))).toHaveLength(1);
     // the catalog tells it
@@ -305,7 +314,7 @@ it("a reread asked for while a run is out gets a run that starts after it, and r
   probe.reread();
   const second = once(probe);
   await first;
-  expect((await second).path).toBe(`${f.rcBin}:${f.loginBin}:/usr/bin:/bin`);
+  expect((await second).path).toBe(`${f.rcBin}:${f.loginBin}:${SYSTEM_BINS}`);
   expect(runs()).toBe(2);
   // rereads asked for before the gap since the last run ends share one run, which waits for it
   const gapped = agentPathProbe({ shell: f.shell, env: f.env, rereadGapMs: 300 });
@@ -323,7 +332,7 @@ it("never takes a relative PATH entry a .zshrc adds, which would make the server
   const f = rcFixture();
   const relativeBin = relative(process.cwd(), f.rcBin);
   const shell = join(f.root, "relative-shell");
-  writeFileSync(shell, `#!/bin/sh\nPATH='${relativeBin}:${f.loginBin}:/usr/bin:/bin'; export PATH\n[ "$1" = "-l" ] && shift\n[ "$1" = "-c" ] && exec /bin/sh -c "$2"\nexit 64\n`, { mode: 0o755 });
+  writeFileSync(shell, `#!/bin/sh\nPATH='${relativeBin}:${f.loginBin}:${SYSTEM_BINS}'; export PATH\n[ "$1" = "-l" ] && shift\n[ "$1" = "-c" ] && exec /bin/sh -c "$2"\nexit 64\n`, { mode: 0o755 });
   const locator = new ShellAgentLocator({ platform: "linux", servicePath: f.servicePath, probe: loginPathProbe({ shell, env: f.env }) });
   expect(await locator.executable("gjc")).toBeNull();
   expect(await catalogLocator({ probe: loginPathProbe({ shell, env: f.env }), servicePath: () => "/nonexistent" })("gjc")).toBeNull();
@@ -562,7 +571,7 @@ it("hung or oversized login probe is killed and reaped, and each miss says why",
 
   // a chatty profile under the limit is fine; a shell that is not there or fails says nothing
   const chatty = fixture("echo 'PATH=/not/this'; echo __OVIS_LOGIN_PATH_END__");
-  expect(await once(loginPathProbe({ shell: chatty.shell, env: chatty.env }))).toEqual({ path: `${chatty.loginBin}:/usr/bin:/bin` });
+  expect(await once(loginPathProbe({ shell: chatty.shell, env: chatty.env }))).toEqual({ path: `${chatty.loginBin}:${SYSTEM_BINS}` });
   const missing = await once(loginPathProbe({ shell: join(chatty.root, "no-such-shell"), env: chatty.env }));
   expect(missing.path).toBeNull();
   const failing = fixture("exit 3");
@@ -627,7 +636,7 @@ it.skipIf(Bun.which("setsid") === null)("reads the PATH printed after the shell 
   // then prints the PATH: all of it arrives after the shell's exit
   const afterExit = (before: string) => fixture(`mkfifo "${"$"}HOME/left"; setsid /bin/sh -c 'echo > "$HOME/left"; while kill -0 "$0" 2>/dev/null; do :; done; ${before} exec /bin/sh -c "$1"' "$$" "$2" & read _ < "${"$"}HOME/left"; exit 0`);
   const f = afterExit("");
-  expect(await once(loginPathProbe({ shell: f.shell, env: f.env, timeoutMs: 5000 }))).toEqual({ path: `${f.loginBin}:/usr/bin:/bin` });
+  expect(await once(loginPathProbe({ shell: f.shell, env: f.env, timeoutMs: 5000 }))).toEqual({ path: `${f.loginBin}:${SYSTEM_BINS}` });
   // what arrives after the exit still counts against the output limit
   const flood = afterExit("yes x | head -c 200000;");
   expect((await once(loginPathProbe({ shell: flood.shell, env: flood.env, timeoutMs: 5000 }))).path).toBeNull();
@@ -642,7 +651,7 @@ it.skipIf(Bun.which("setsid") === null)("answers with the PATH when a process ou
     const result = await once(loginPathProbe({ shell: f.shell, env: f.env, timeoutMs: 2000, graceMs: 100 }));
     held = Number(readFileSync(join(f.home, "held.pid"), "utf8"));
     // the pipes never close: the PATH read by exit is the answer, not a timeout's miss
-    expect(result).toEqual({ path: `${f.loginBin}:/usr/bin:/bin` });
+    expect(result).toEqual({ path: `${f.loginBin}:${SYSTEM_BINS}` });
     expect(await running(held)).toBe(true);
   } finally {
     if (held === 0 && existsSync(join(f.home, "held.pid"))) held = Number(readFileSync(join(f.home, "held.pid"), "utf8"));
@@ -655,7 +664,7 @@ it("clears every timer it set once it answered", async () => {
   const set = spyOn(globalThis, "setTimeout");
   const cleared = spyOn(globalThis, "clearTimeout");
   try {
-    expect(await once(loginPathProbe({ shell: f.shell, env: f.env, graceMs: 1000 }))).toEqual({ path: `${f.loginBin}:/usr/bin:/bin` });
+    expect(await once(loginPathProbe({ shell: f.shell, env: f.env, graceMs: 1000 }))).toEqual({ path: `${f.loginBin}:${SYSTEM_BINS}` });
     const timers = set.mock.results.map((result) => result.value as unknown);
     // the timeout, and the wait for close after the exit
     expect(timers.length).toBeGreaterThanOrEqual(2);

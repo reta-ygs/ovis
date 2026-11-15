@@ -40,7 +40,7 @@ const frameBytes = (event: MachineEvent): number => `data: ${JSON.stringify(even
 
 async function open(manager: MachineManager, onRevoke?: (end: () => void) => () => void) {
   const abort = new AbortController();
-  const response = await handleMachineRequest(new Request("http://127.0.0.1:7317/api/machines/events", { signal: abort.signal }), manager, onRevoke);
+  const response = await handleMachineRequest(new Request("http://127.0.0.1:7317/api/machines/events", { signal: abort.signal }), manager, onRevoke, undefined, undefined, undefined, undefined, undefined, undefined, true, "http://127.0.0.1:7317");
   const reader = response.body!.getReader();
   const decoder = new TextDecoder();
   let buffer = "";

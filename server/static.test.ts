@@ -114,10 +114,10 @@ describe("the PC's own pages and the account service", () => {
   const saved = process.env["OVIS_ACCOUNT_SERVICE_URL"];
   const restore = () => { if (saved === undefined) delete process.env["OVIS_ACCOUNT_SERVICE_URL"]; else process.env["OVIS_ACCOUNT_SERVICE_URL"] = saved; };
 
-  it("may reach account.ovis.sh by default, exactly the https origin OVIS_ACCOUNT_SERVICE_URL names, and nothing when it is off or not https", () => {
+  it("is off by default, allows only the https origin OVIS_ACCOUNT_SERVICE_URL names, and nothing when it is off or not https", () => {
     try {
       delete process.env["OVIS_ACCOUNT_SERVICE_URL"];
-      expect(connect()).toBe("connect-src 'self' https://account.ovis.sh");
+      expect(connect()).toBe("connect-src 'self'");
       process.env["OVIS_ACCOUNT_SERVICE_URL"] = "https://account.example.com/some/path";
       expect(connect()).toBe("connect-src 'self' https://account.example.com");
       process.env["OVIS_ACCOUNT_SERVICE_URL"] = "off";
@@ -132,7 +132,7 @@ describe("the PC's own pages and the account service", () => {
     const meta = (html: string) => /<meta name="ovis-pc-account-service" content="([^"]*)" \/>\n<\/head>/.exec(html)?.[1] ?? null;
     try {
       delete process.env["OVIS_ACCOUNT_SERVICE_URL"];
-      expect(meta(accountShell(shell))).toBe("https://account.ovis.sh");
+      expect(meta(accountShell(shell))).toBeNull();
       process.env["OVIS_ACCOUNT_SERVICE_URL"] = "https://account.example.com/some/path";
       expect(meta(accountShell(shell))).toBe("https://account.example.com");
       for (const value of ["off", "http://127.0.0.1:8787"]) {
@@ -142,10 +142,10 @@ describe("the PC's own pages and the account service", () => {
     } finally { restore(); }
   });
 
-  it("collects the mailbox from account.ovis.sh by default, and from none when the service is off", () => {
+  it("has no mailbox when disabled by default or set to off, and parses explicit origins", () => {
     try {
       delete process.env["OVIS_ACCOUNT_SERVICE_URL"];
-      expect(accountServiceUrl()).toBe("https://account.ovis.sh");
+      expect(() => accountServiceUrl()).toThrow("turned off");
       expect(accountServiceUrl("http://127.0.0.1:8787/v1")).toBe("http://127.0.0.1:8787");
       process.env["OVIS_ACCOUNT_SERVICE_URL"] = "off";
       expect(() => accountServiceUrl()).toThrow("turned off");

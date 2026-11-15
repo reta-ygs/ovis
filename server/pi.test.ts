@@ -538,7 +538,10 @@ it.skipIf(process.platform !== "linux")("recovers Pi argv and process HOME from 
   const target = join(profileStore, "pid-profile.jsonl");
   writeFileSync(target, "{\"type\":\"session\"}\n");
   const bridgeHome = join(root, "bridge-home");
-  const child = Bun.spawn(["/bin/bash", "-c", "exec -a pi /bin/sleep 30"], {
+  const bash = Bun.which("bash") ?? "/bin/bash";
+  const node = Bun.which("node");
+  if (!node) throw new Error("node is required for the Pi process fixture");
+  const child = Bun.spawn([bash, "-c", 'exec -a pi "$1" -e "setInterval(() => {}, 30000)"', "sh", node], {
     cwd: root,
     env: { HOME: processHome, PATH: "/usr/bin:/bin", PI_CODING_AGENT_DIR: "~/custom-agent" },
     stdout: "ignore",

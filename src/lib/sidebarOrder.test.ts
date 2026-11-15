@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentStatus, HerdrPane, SessionSnapshot } from "../../shared/protocol.ts";
-import machines from "@shared/test-fixtures/machines.json";
+import machines from "../../shared/test-fixtures/machines.json";
 import { activityOrder, isSeenDone, liveSeqs, newSeqMemory, shownStatus, stateSeqs } from "./sidebarOrder.ts";
 import { DEFAULT_SETTINGS, sanitizeSettings } from "./settings.ts";
 

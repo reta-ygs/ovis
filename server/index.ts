@@ -122,6 +122,7 @@ export function herdrCoreInstaller(): HcInstaller {
 export interface ServerInstance {
   /** A socket context with this server's services, also usable with transport operations replaced. */
   readonly context: ServerContext;
+  readonly bootId: string;
   port: number;
   hostname: string;
   /** the opt-in LAN HTTPS listener when it is up (server/lan-https.ts), else null */
@@ -502,6 +503,7 @@ export function createServer(
 
   return {
     context: socketContext(server),
+    bootId,
     port: server.port ?? 0,
     hostname,
     lanHttps,
@@ -608,6 +610,7 @@ export async function serve(): Promise<void> {
     herdrCore?.stop();
     process.exit(1);
   }
+  const socket = herdrSocketPath();
   let stopping = false;
   const shutdown = () => {
     if (stopping) return;
@@ -622,9 +625,22 @@ export async function serve(): Promise<void> {
   };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
-  if (process.env["OVIS_MANAGED"] === "1") process.on("disconnect", shutdown);
+  if (process.env["OVIS_MANAGED"] === "1") {
+    process.on("disconnect", shutdown);
+    process.on("message", (message: unknown) => {
+      if (stopping || typeof message !== "object" || message === null) return;
+      if ((message as { type?: unknown }).type !== "bridge-health-probe") return;
+      void ping(socket).then(() => true, () => false).then((runtimeOk) => {
+        if (stopping) return;
+        try {
+          process.send?.({ type: "bridge-health-answer", boot_id: instance.bootId, runtime: runtime(), runtime_ok: runtimeOk });
+        } catch {
+          /* supervisor disconnected */
+        }
+      });
+    });
+  }
   console.log(`Ovis listening on http://${instance.hostname}:${instance.port}`);
-  const socket = herdrSocketPath();
   void ping(socket).catch(() => {
     console.error(herdrCore
       ? `herdr-core is not reachable through ${socket}: start it with \`${hcBin()} server start\`, or set OVIS_HC_BIN to hc's full path.`

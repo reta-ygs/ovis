@@ -1,15 +1,18 @@
-import { afterAll, afterEach, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { HerdrPane } from "../shared/protocol.ts";
+import { testCfAccess, type TestCfFixture } from "./cf-access.fake.ts";
 import { createServer } from "./index.ts";
 import { closeOpenCodeNative, openCodeNativeState, openCodePaneService } from "./opencode-native.ts";
 import { forgetOpenCodeService, openCodeServiceOptions } from "./opencode-service.ts";
 
 const root = mkdtempSync(join(tmpdir(), "opencode-native-stop-"));
 const cleanups: (() => void)[] = [];
+let access: TestCfFixture;
+beforeAll(async () => { access = await testCfAccess(); });
 afterEach(() => {
   for (const cleanup of cleanups.splice(0).reverse()) cleanup();
   closeOpenCodeNative();
@@ -67,7 +70,7 @@ function useService(fake: ReturnType<typeof opencodeService>): void {
 
 function server(): ReturnType<typeof createServer> {
   const stateDir = mkdtempSync(join(tmpdir(), "opencode-native-stop-state-"));
-  const instance = createServer({ port: 0, hostname: "127.0.0.1", stateDir, token: "", machines: false, sidecar: false });
+  const instance = createServer({ port: 0, hostname: "127.0.0.1", stateDir, machines: false, sidecar: false, cfAccess: access.cfAccess });
   cleanups.push(() => { instance.stop(); rmSync(stateDir, { recursive: true, force: true }); });
   return instance;
 }

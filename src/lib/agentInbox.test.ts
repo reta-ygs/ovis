@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { Machine } from "../../shared/machines.ts";
 import type { AgentStatus, HerdrPane } from "../../shared/protocol.ts";
-import machinesFixture from "@shared/test-fixtures/machines.json";
+import machinesFixture from "../../shared/test-fixtures/machines.json";
 import { heldOrder, inboxEmpty, inboxFiltered, inboxOrder, inboxSearched, inboxSinceAt, inboxStartsOpen, inboxStatus, inboxWords, questionWords } from "./agentInbox.ts";
 import type { AgentRow } from "./agentRoster.ts";
 import type { SidebarActivity } from "./sidebarActivity.tsx";

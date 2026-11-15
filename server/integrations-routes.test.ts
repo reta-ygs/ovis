@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { AgentIntegration } from "../shared/protocol.ts";
 import * as herdr from "./herdr/client.ts";
 import { HerdrError } from "./herdr/client.ts";
+import { testCfAccess, type TestCfFixture } from "./cf-access.fake.ts";
 import { createServer } from "./index.ts";
 
 describe("GET /api/integrations", () => {
@@ -15,11 +16,16 @@ describe("GET /api/integrations", () => {
   ];
   let server: ReturnType<typeof createServer>;
   let stateDir: string;
+  let access: TestCfFixture;
   const list = spyOn(herdr, "integrationList").mockImplementation(async () => listed);
-  const get = (path = "/api/integrations", init?: RequestInit) => fetch(`http://127.0.0.1:${server.port}${path}`, init);
-  beforeAll(() => {
+  const get = (path = "/api/integrations", init?: RequestInit) => fetch(`http://127.0.0.1:${server.port}${path}`, {
+    ...init,
+    headers: access.headers(init?.headers as Record<string, string> | undefined),
+  });
+  beforeAll(async () => {
+    access = await testCfAccess();
     stateDir = mkdtempSync(join(tmpdir(), "ovis-integrations-route-"));
-    server = createServer({ port: 0, hostname: "127.0.0.1", stateDir, token: "", machines: false, sidecar: false });
+    server = createServer({ port: 0, hostname: "127.0.0.1", stateDir, machines: false, sidecar: false, cfAccess: access.cfAccess });
   });
   afterEach(() => {
     list.mockClear();
@@ -52,7 +58,7 @@ describe("GET /api/integrations", () => {
   });
 
   it("refuses anything but GET without asking herdr", async () => {
-    const response = await get("/api/integrations", { method: "POST", headers: { origin: `http://127.0.0.1:${server.port}` } });
+    const response = await get("/api/integrations", { method: "POST", headers: { origin: access.publicOrigin } });
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: { code: "method_not_allowed", message: "use GET" } });
     expect(list).not.toHaveBeenCalled();

@@ -24,19 +24,45 @@ export function processStartedAt(pid: number): number | null {
   return linuxBirth(pid);
 }
 
+function linuxStatTicks(pid: number): number | null {
+  try {
+    const ticks = Number(readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").pop()!.split(" ")[19]);
+    return Number.isFinite(ticks) ? ticks : null;
+  } catch {
+    return null;
+  }
+}
+
+function linuxBirthFromTicks(ticks: number): number | null {
+  try {
+    const boot = Number(readFileSync("/proc/stat", "utf8").match(/^btime (\d+)$/m)?.[1]);
+    return Number.isFinite(boot) ? boot * 1000 + ticks * 10 : null;
+  } catch {
+    return null;
+  }
+}
+
+function linuxRawUptimeStart(ticks: number, now: number, birth: number | null): number | null {
+  try {
+    const uptime = Number(readFileSync("/proc/uptime", "utf8").split(" ")[0]);
+    const raw = now - uptime * 1000 + ticks * 10;
+    // Ignore /proc/uptime when virtualized (e.g. LXCFS container uptime vs host starttime ticks).
+    if (!Number.isFinite(raw) || raw > now + 20) return null;
+    if (birth !== null && (raw < birth - 50 || raw > birth + 1050)) return null;
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Linux: /proc/stat's `btime` and the start's ticks after boot. The same on every read, so it is the
  * process's identity (pending input compares it exactly); but `btime` is whole seconds and stays
  * where it was when the clock is stepped later, so it may be up to a second before the real start.
  */
 function linuxBirth(pid: number): number | null {
-  try {
-    const ticks = Number(readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").pop()!.split(" ")[19]);
-    const boot = Number(readFileSync("/proc/stat", "utf8").match(/^btime (\d+)$/m)?.[1]);
-    return Number.isFinite(ticks) && Number.isFinite(boot) ? boot * 1000 + ticks * 10 : null;
-  } catch {
-    return null;
-  }
+  const ticks = linuxStatTicks(pid);
+  return ticks === null ? null : linuxBirthFromTicks(ticks);
 }
 
 /**
@@ -88,13 +114,15 @@ export function processStartUpperBound(pid: number): number | null {
     const started = processStartedAt(pid);
     return started === null ? null : started + 1000;
   }
-  try {
-    const ticks = Number(readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").pop()!.split(" ")[19]);
-    const uptime = Number(readFileSync("/proc/uptime", "utf8").split(" ")[0]);
-    // uptime and start ticks truncate to 10ms. Reading the wall clock last and adding
-    // one tick bounds the process start from above, rather than admitting older threads.
-    return Number.isFinite(ticks) && Number.isFinite(uptime) ? Date.now() - uptime * 1000 + ticks * 10 + 10 : null;
-  } catch { return null; }
+  const ticks = linuxStatTicks(pid);
+  if (ticks === null) return null;
+  const now = Date.now();
+  const birth = linuxBirthFromTicks(ticks);
+  const raw = linuxRawUptimeStart(ticks, now, birth);
+  // uptime and start ticks truncate to 10ms. Reading the wall clock last and adding
+  // one tick bounds the process start from above, rather than admitting older threads.
+  if (raw !== null) return raw + 10;
+  return birth === null ? null : Math.min(now + 10, birth + 1010);
 }
 
 /**
@@ -103,14 +131,11 @@ export function processStartUpperBound(pid: number): number | null {
  * first: the uptime read after it is at most one tick late.
  */
 function linuxReadStart(pid: number): number | null {
-  try {
-    const now = Date.now();
-    const uptime = Number(readFileSync("/proc/uptime", "utf8").split(" ")[0]);
-    const ticks = Number(readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").pop()!.split(" ")[19]);
-    return Number.isFinite(ticks) && Number.isFinite(uptime) ? now - uptime * 1000 + ticks * 10 : null;
-  } catch {
-    return null;
-  }
+  const ticks = linuxStatTicks(pid);
+  if (ticks === null) return null;
+  const now = Date.now();
+  const birth = linuxBirthFromTicks(ticks);
+  return linuxRawUptimeStart(ticks, now, birth);
 }
 
 /**

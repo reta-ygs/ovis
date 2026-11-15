@@ -6,11 +6,13 @@ import { join } from "node:path";
 import type { SessionSnapshot } from "../shared/protocol.ts";
 import * as herdr from "./herdr/client.ts";
 import { HerdrError } from "./herdr/client.ts";
+import { testCfAccess, type TestCfFixture } from "./cf-access.fake.ts";
 import { createServer } from "./index.ts";
 
 describe("GET /api/pane/plan", () => {
   let server: ReturnType<typeof createServer>;
   let stateDir: string;
+  let access: TestCfFixture;
   const url = (path: string) => `http://127.0.0.1:${server.port}${path}`;
   const error = async (response: Response) => [response.status, ((await response.json()) as { error: { code: string } }).error.code];
   const noPlan = async (response: Response) => {
@@ -20,9 +22,10 @@ describe("GET /api/pane/plan", () => {
     expect(Number.isFinite(Date.parse(body.server_time))).toBe(true);
   };
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    access = await testCfAccess();
     stateDir = mkdtempSync(join(tmpdir(), "ovis-plan-route-"));
-    server = createServer({ port: 0, hostname: "127.0.0.1", stateDir, token: "", machines: false, sidecar: false });
+    server = createServer({ port: 0, hostname: "127.0.0.1", stateDir, machines: false, sidecar: false, cfAccess: access.cfAccess });
   });
   afterAll(() => {
     server.stop();
@@ -30,8 +33,8 @@ describe("GET /api/pane/plan", () => {
   });
 
   it("wants GET and a pane", async () => {
-    expect(await error(await fetch(url("/api/pane/plan?pane_id=w1:p1"), { method: "POST", headers: { origin: url("") } }))).toEqual([400, "method_not_allowed"]);
-    expect(await error(await fetch(url("/api/pane/plan")))).toEqual([400, "missing_pane_id"]);
+    expect(await error(await fetch(url("/api/pane/plan?pane_id=w1:p1"), { method: "POST", headers: access.originHeaders() }))).toEqual([400, "method_not_allowed"]);
+    expect(await error(await fetch(url("/api/pane/plan"), { headers: access.headers() }))).toEqual([400, "missing_pane_id"]);
   });
 
   it("tells a pane herdr does not have, or one that keeps no plan, that it has none", async () => {
@@ -42,8 +45,8 @@ describe("GET /api/pane/plan", () => {
     } as unknown as SessionSnapshot;
     const snap = spyOn(herdr, "sessionSnapshot").mockImplementation(async () => snapshot);
     try {
-      await noPlan(await fetch(url("/api/pane/plan?pane_id=w9:p9")));
-      await noPlan(await fetch(url("/api/pane/plan?pane_id=w1:p1")));
+      await noPlan(await fetch(url("/api/pane/plan?pane_id=w9:p9"), { headers: access.headers() }));
+      await noPlan(await fetch(url("/api/pane/plan?pane_id=w1:p1"), { headers: access.headers() }));
     } finally {
       snap.mockRestore();
     }
@@ -53,7 +56,7 @@ describe("GET /api/pane/plan", () => {
     let answer: () => void = () => undefined;
     const snap = spyOn(herdr, "sessionSnapshot").mockImplementation(() => new Promise((_resolve, reject) => { answer = () => reject(new HerdrError("timeout", "herdr did not answer")); }));
     try {
-      await noPlan(await fetch(url("/api/pane/plan?pane_id=w1:p1")));
+      await noPlan(await fetch(url("/api/pane/plan?pane_id=w1:p1"), { headers: access.headers() }));
     } finally {
       answer();
       snap.mockRestore();

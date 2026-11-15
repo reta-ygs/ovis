@@ -165,7 +165,9 @@ it.skipIf(process.platform !== "linux")("shows no conversation of the store an e
   const other = join(root, "other-store");
   mkdirSync(other, { recursive: true });
   const start = async (codexHome: string) => {
-    const child = Bun.spawn(["/bin/bash", "-c", "echo READY; exec -a codex sleep 600"], { env: { ...process.env, CODEX_HOME: codexHome }, stdout: "pipe", stderr: "ignore" });
+    const node = Bun.which("node");
+    if (!node) throw new Error("node is required for the Codex process fixture");
+    const child = Bun.spawn([Bun.which("bash") ?? "/bin/bash", "-c", 'echo READY; exec -a codex "$1" -e "setInterval(() => {}, 60000)"', "fixture", node], { env: { ...process.env, CODEX_HOME: codexHome }, stdout: "pipe", stderr: "ignore" });
     children.push(child);
     expect(await firstLine(child.stdout)).toBe("READY\n");
     return child.pid;
@@ -195,7 +197,9 @@ it.skipIf(process.platform !== "linux")("shows no conversation of the store the 
   const other = join(root, "other-store");
   mkdirSync(other, { recursive: true });
   const start = async (codexHome: string) => {
-    const child = Bun.spawn(["/bin/bash", "-c", "echo READY; exec -a codex sleep 600"], { env: { ...process.env, CODEX_HOME: codexHome }, stdout: "pipe", stderr: "ignore" });
+    const node = Bun.which("node");
+    if (!node) throw new Error("node is required for the Codex process fixture");
+    const child = Bun.spawn([Bun.which("bash") ?? "/bin/bash", "-c", 'echo READY; exec -a codex "$1" -e "setInterval(() => {}, 60000)"', "fixture", node], { env: { ...process.env, CODEX_HOME: codexHome }, stdout: "pipe", stderr: "ignore" });
     children.push(child);
     expect(await firstLine(child.stdout)).toBe("READY\n");
     return child.pid;
@@ -549,7 +553,9 @@ it.skipIf(process.platform !== "linux")("reads no conversation from the default 
   const own = join(root, "own-store");
   mkdirSync(own, { recursive: true });
   // READY once the shell runs with its own environment (/proc shows it from then on), then it becomes `codex`
-  const child = Bun.spawn(["/bin/bash", "-c", "echo READY; exec -a codex sleep 600"], { env: { ...process.env, CODEX_HOME: own }, stdout: "pipe", stderr: "ignore" });
+  const node = Bun.which("node");
+  if (!node) throw new Error("node is required for the Codex process fixture");
+  const child = Bun.spawn([Bun.which("bash") ?? "/bin/bash", "-c", 'echo READY; exec -a codex "$1" -e "setInterval(() => {}, 60000)"', "fixture", node], { env: { ...process.env, CODEX_HOME: own }, stdout: "pipe", stderr: "ignore" });
   children.push(child);
   expect(await firstLine(child.stdout)).toBe("READY\n");
   const defaultBefore = process.env["CODEX_HOME"];
@@ -685,7 +691,7 @@ async function runningCodex(resume = false, env = process.env): Promise<ReturnTy
   const node = Bun.which("node");
   if (node === null) throw new Error("node is required for the Codex process fixture");
   const child = Bun.spawn([
-    "/bin/bash", "-c", 'exec -a "$1" "$2" -e \'process.stdout.write("READY\\n"); process.stdin.resume()\' "${@:3}"',
+    Bun.which("bash") ?? "/bin/bash", "-c", 'exec -a "$1" "$2" -e \'process.stdout.write("READY\\n"); process.stdin.resume()\' "${@:3}"',
     "fixture", join(root, "codex"), node, ...(resume ? ["resume", thread] : []),
   ], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env });
   children.push(child);
@@ -698,7 +704,7 @@ async function codexHolding(rollout: string): Promise<ReturnType<typeof Bun.spaw
   const node = Bun.which("node");
   if (node === null) throw new Error("node is required for the Codex process fixture");
   const child = Bun.spawn([
-    "/bin/bash", "-c", 'exec -a "$1" "$2" -e \'globalThis.held = require("node:fs").openSync(process.argv[1], "r"); process.stdout.write("READY\\n"); process.stdin.resume()\' "$3"',
+    Bun.which("bash") ?? "/bin/bash", "-c", 'exec -a "$1" "$2" -e \'globalThis.held = require("node:fs").openSync(process.argv[1], "r"); process.stdout.write("READY\\n"); process.stdin.resume()\' "$3"',
     "fixture", join(root, "codex"), node, rollout,
     // its store is the one it writes in, as a real Codex's environment names it
   ], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, CODEX_HOME: home } });
@@ -1074,14 +1080,15 @@ async function loadedByExec(id: string): Promise<ReturnType<typeof Bun.spawn>> {
   const folder = join(home, "thread-writer-locks");
   mkdirSync(folder, { recursive: true });
   const bin = mkdtempSync(join(root, "exec-run-"));
-  writeFileSync(join(bin, "exec"), "");
+  const bash = Bun.which("bash") ?? "/bin/bash";
+  writeFileSync(join(bin, "exec"), 'while IFS= read -r line; do printf "%s\\n" "$line"; done\n');
   const child = Bun.spawn(["python3", "-c", [
     "import fcntl, os, sys",
     "lock = os.open(sys.argv[1], os.O_WRONLY | os.O_APPEND | os.O_CREAT)",
     "fcntl.flock(lock, fcntl.LOCK_EX)",
     "os.set_inheritable(lock, True)",
-    "os.execv('/bin/cat', [os.path.join(sys.argv[2], 'codex'), 'exec', '-'])",
-  ].join("\n"), join(folder, `${id}.lock`), bin], { cwd: bin, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    "os.execv(sys.argv[3], [os.path.join(sys.argv[2], 'codex'), 'exec', '-'])",
+  ].join("\n"), join(folder, `${id}.lock`), bin, bash], { cwd: bin, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
   children.push(child);
   // only cat, once Python has become it, echoes what it reads
   child.stdin.write("READY\n");

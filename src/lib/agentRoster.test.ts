@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { Machine, MachineState } from "../../shared/machines.ts";
 import type { AgentStatus, HerdrPane, SessionSnapshot } from "../../shared/protocol.ts";
-import fixture from "@shared/test-fixtures/machines.json";
+import fixture from "../../shared/test-fixtures/machines.json";
 import { agentRoster, groupAgentRows, splitBackgroundRows, type AgentRow } from "./agentRoster.ts";
 import { sidebarPinKey } from "./sidebarPins.ts";
 

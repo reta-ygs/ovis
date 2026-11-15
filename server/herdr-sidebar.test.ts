@@ -333,13 +333,15 @@ describe("the machine events", () => {
     const config = new HerdrSidebarConfig(path, 10);
     const manager = { subscribe: () => () => undefined } as unknown as MachineManager;
     const abort = new AbortController();
-    const response = await handleMachineRequest(new Request("http://127.0.0.1:7317/api/machines/events", { signal: abort.signal }), manager, undefined, undefined, false, config);
+    const response = await handleMachineRequest(new Request("http://127.0.0.1:7317/api/machines/events", { signal: abort.signal }), manager, undefined, undefined, false, config, undefined, undefined, undefined, undefined, "http://127.0.0.1:7317");
+    expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("text/event-stream");
     const reader = response.body!.getReader();
     const events: MachineEvent[] = [];
     let buffer = "";
     const read = async (): Promise<void> => {
-      const { value } = await reader.read();
+      const { value, done } = await reader.read();
+      if (done) throw new Error("machine events stream ended unexpectedly");
       buffer += new TextDecoder().decode(value);
       for (let end = buffer.indexOf("\n\n"); end >= 0; end = buffer.indexOf("\n\n")) {
         const frame = buffer.slice(0, end);
@@ -366,11 +368,16 @@ describe("the machine events", () => {
     const relayed: MachineEvent = { type: "machine-message", machine_id: "pc1", message: { type: "snapshot", snapshot } };
     const manager = { subscribe: (listener: (event: MachineEvent) => void) => { listener({ type: "machines", machines: [] }); listener(relayed); return () => undefined; } } as unknown as MachineManager;
     const abort = new AbortController();
-    const response = await handleMachineRequest(new Request("http://127.0.0.1:7317/api/machines/events", { signal: abort.signal }), manager, undefined, undefined, true, config);
+    const response = await handleMachineRequest(new Request("http://127.0.0.1:7317/api/machines/events", { signal: abort.signal }), manager, undefined, undefined, true, config, undefined, undefined, undefined, undefined, "http://127.0.0.1:7317");
+    expect(response.status).toBe(200);
     const reader = response.body!.getReader();
     let text = "";
     try {
-      while (!text.includes('"machine-message"')) text += new TextDecoder().decode((await reader.read()).value);
+      while (!text.includes('"machine-message"')) {
+        const { value, done } = await reader.read();
+        if (done) throw new Error("machine events stream ended unexpectedly");
+        text += new TextDecoder().decode(value);
+      }
       const frame = text.split("\n\n").find((part) => part.includes('"machine-message"'))!;
       const told = JSON.parse(frame.slice("data: ".length)) as MachineEvent;
       expect(told.type === "machine-message" && told.message.type === "snapshot" ? told.message.snapshot.panes[0]!.tokens : null).toEqual({ eta: "soon" });
@@ -406,7 +413,7 @@ describe("the machine events", () => {
       expect(drawn().filter((value) => value.startsWith("off"))).toEqual([]);
     };
     const poll = async () => {
-      const response = await handleMachineRequest(new Request("http://127.0.0.1:7317/api/machines"), manager, undefined, undefined, true, config);
+      const response = await handleMachineRequest(new Request("http://127.0.0.1:7317/api/machines"), manager, undefined, undefined, true, config, undefined, undefined, undefined, undefined, "http://127.0.0.1:7317");
       expect(response.status).toBe(200);
       const body = await response.text();
       text += body;
@@ -414,14 +421,16 @@ describe("the machine events", () => {
     };
     const open = async () => {
       const abort = new AbortController();
-      const response = await handleMachineRequest(new Request("http://127.0.0.1:7317/api/machines/events", { signal: abort.signal }), manager, undefined, undefined, true, config);
+      const response = await handleMachineRequest(new Request("http://127.0.0.1:7317/api/machines/events", { signal: abort.signal }), manager, undefined, undefined, true, config, undefined, undefined, undefined, undefined, "http://127.0.0.1:7317");
+      expect(response.status).toBe(200);
       const reader = response.body!.getReader();
       const events: MachineEvent[] = [];
       let buffer = "";
       // reads until `count` events came, applying each to the browser in order
       const until = async (count: number): Promise<MachineEvent[]> => {
         while (events.length < count) {
-          const { value } = await reader.read();
+          const { value, done } = await reader.read();
+          if (done) throw new Error("machine events stream ended unexpectedly");
           const chunk = new TextDecoder().decode(value);
           text += chunk;
           buffer += chunk;

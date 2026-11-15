@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { dlopen, FFIType } from "bun:ffi";
 
 import type { Access } from "./access.ts";
+import { testCfAccess, type TestCfFixture } from "./cf-access.fake.ts";
 import { handleRequest, type ServerContext } from "./dispatch.ts";
 import { copyFileAttributes } from "./file-attributes.ts";
 import { MAX_TEXT_SAVE_BODY_BYTES, textEditAllowed, textSaveHooks } from "./file-edit.ts";
@@ -20,6 +21,7 @@ const sha = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).d
 // Linux's own calls and outcomes (libc.so.6, /proc/self/fd): macOS saves by its own proof, Windows not at all
 describe.skipIf(process.platform !== "linux")("editing a text file (#771)", () => {
   let server: ReturnType<typeof createServer>;
+  let access: TestCfFixture;
   let stateDir: string;
   let folder: string;
   let outside: string;
@@ -27,9 +29,9 @@ describe.skipIf(process.platform !== "linux")("editing a text file (#771)", () =
   const url = (path: string) => `http://127.0.0.1:${server.port}${path}`;
   const q = (value: string) => encodeURIComponent(value);
   const error = async (response: Response) => [response.status, ((await response.json()) as { error: { code: string } }).error.code];
-  const open = (path: string) => fetch(url(`/api/fs/text?pane_id=w1:p1&path=${q(path)}`));
+  const open = (path: string) => fetch(url(`/api/fs/text?pane_id=w1:p1&path=${q(path)}`), { headers: access.headers() });
   const save = (path: string, revision: string, text: string, headers: Record<string, string> = {}) => fetch(url("/api/fs/text"), {
-    method: "PUT", headers: { origin: url(""), "content-type": "application/json", ...headers },
+    method: "PUT", headers: access.originHeaders({ "content-type": "application/json", ...headers }),
     body: JSON.stringify({ pane_id: "w1:p1", path, revision, text }),
   });
   /** a file under the pane's folder, written fresh for one test */
@@ -43,6 +45,7 @@ describe.skipIf(process.platform !== "linux")("editing a text file (#771)", () =
   let paneGet: ReturnType<typeof spyOn>;
 
   beforeAll(() => {
+    access = testCfAccess();
     stateDir = mkdtempSync(join(tmpdir(), "ovis-file-edit-"));
     folder = join(stateDir, "project");
     outside = join(stateDir, "outside");
@@ -50,7 +53,7 @@ describe.skipIf(process.platform !== "linux")("editing a text file (#771)", () =
     mkdirSync(outside);
     paneCwd = folder;
     paneGet = spyOn(herdr, "paneGet").mockImplementation(async (paneId) => ({ pane_id: paneId, workspace_id: "w1", tab_id: "w1:t1", cwd: paneCwd, agent_status: "idle" }) as unknown as Awaited<ReturnType<typeof herdr.paneGet>>);
-    server = createServer({ port: 0, hostname: "127.0.0.1", stateDir, token: "", machines: false, sidecar: false });
+    server = createServer({ port: 0, hostname: "127.0.0.1", stateDir, machines: false, sidecar: false, cfAccess: access.cfAccess });
     // on this thread, where the hooks are seen; one test below runs on the file threads
     setFilePoolOptions({ inline: runFileTask });
   });
@@ -237,10 +240,10 @@ describe.skipIf(process.platform !== "linux")("editing a text file (#771)", () =
     expect(await error(await save(plain, sha("plain\n"), "x\r\n"))).toEqual([400, "invalid_text"]);
     expect(await error(await save(plain, sha("plain\n"), "\ud800"))).toEqual([400, "invalid_text"]);
     expect(await error(await save(plain, "not-a-hash", "x\n"))).toEqual([400, "invalid_revision"]);
-    const huge = await fetch(url("/api/fs/text"), { method: "PUT", headers: { origin: url(""), "content-type": "application/json" }, body: `"${"a".repeat(MAX_TEXT_SAVE_BODY_BYTES)}"` });
+    const huge = await fetch(url("/api/fs/text"), { method: "PUT", headers: access.originHeaders({ "content-type": "application/json" }), body: `"${"a".repeat(MAX_TEXT_SAVE_BODY_BYTES)}"` });
     expect(await error(huge)).toEqual([413, "too_large"]);
-    expect(await error(await fetch(url(`/api/fs/text?path=${q(plain)}`)))).toEqual([400, "missing_pane"]);
-    expect(await error(await fetch(url("/api/fs/text"), { method: "POST", headers: { origin: url("") } }))).toEqual([400, "method_not_allowed"]);
+    expect(await error(await fetch(url(`/api/fs/text?path=${q(plain)}`), { headers: access.headers() }))).toEqual([400, "missing_pane"]);
+    expect(await error(await fetch(url("/api/fs/text"), { method: "POST", headers: access.originHeaders() }))).toEqual([400, "method_not_allowed"]);
     expect(readFileSync(plain, "utf8")).toBe("plain\n");
   });
 
@@ -251,19 +254,18 @@ describe.skipIf(process.platform !== "linux")("editing a text file (#771)", () =
     expect(readFileSync(note, "utf8")).toBe("win\n");
   });
 
-  it("is for a driving device only, over the relay and on the LAN too", async () => {
+  it("refuses relay peers and unauthenticated LAN requests", async () => {
     const note = file("relay.md", "relay\n");
-    const request = (method: string) => new Request(`https://relay.ovis.invalid/api/fs/text?pane_id=w1:p1&path=${q(note)}`, { method, headers: { origin: "https://relay.ovis.invalid", "content-type": "application/json" }, ...(method === "PUT" ? { body: JSON.stringify({ pane_id: "w1:p1", path: note, revision: sha("relay\n"), text: "x\n" }) } : {}) });
+    const request = (method: string) => new Request(`https://relay.ovis.invalid/api/fs/text?pane_id=w1:p1&path=${q(note)}`, { method, headers: access.originHeaders({ origin: "https://relay.ovis.invalid", "content-type": "application/json" }), ...(method === "PUT" ? { body: JSON.stringify({ pane_id: "w1:p1", path: note, revision: sha("relay\n"), text: "x\n" }) } : {}) });
     const through = (role: "watch" | "drive"): ServerContext => ({
       ...server.context, peer: { kind: "relay", device: { id: "0123456789abcdef", label: "Phone", role }, sessionId: "s", serverId: "0123456789abcdef0123456789abcdef", key: "" },
       requestIP: () => null, timeout: () => {}, upgrade: () => false,
     });
-    for (const method of ["GET", "PUT"]) expect(await error((await handleRequest(request(method), through("watch")))!)).toEqual([403, "read_only"]);
-    expect((await handleRequest(request("GET"), through("drive")))?.status).toBe(200);
-    // an open LAN install's window signed in as nobody
+    for (const method of ["GET", "PUT"]) expect((await handleRequest(request(method), through("watch")))?.status).toBe(403);
+    expect((await handleRequest(request("GET"), through("drive")))?.status).toBe(403);
     const lan: ServerContext = { ...server.context, requestIP: () => ({ address: "192.168.1.20" }), timeout: () => {}, upgrade: () => false };
     const fromLan = new Request(`http://192.168.1.10:${server.port}/api/fs/text?pane_id=w1:p1&path=${q(note)}`, { headers: { host: `192.168.1.10:${server.port}` } });
-    expect(await error((await handleRequest(fromLan, lan))!)).toEqual([403, "drive_only"]);
+    expect(await error((await handleRequest(fromLan, lan))!)).toEqual([401, "cf_access_required"]);
     expect(readFileSync(note, "utf8")).toBe("relay\n");
   });
 });

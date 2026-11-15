@@ -9,15 +9,16 @@ import { AgentDetector, catalogLocator, runVersion } from "./agent-catalog-detec
 import { handleAgentCatalogRequest } from "./agent-catalog-routes.ts";
 import type { LoginPathProbe } from "./shell-agent.ts";
 import { createServer } from "./index.ts";
+import { testCfAccess } from "./cf-access.fake.ts";
 import * as runtime from "./herdr-core/runtime.ts";
 import { handleMachineRequest } from "./machine-api.ts";
 import type { MachineManager } from "./machines.ts";
 
-const BROWSER_TOKEN = "catalog-browser-token";
 const BRIDGE_TOKEN = "c".repeat(64);
 const WATCH_TOKEN = "w".repeat(64);
 
 describe("GET /api/agent-catalog", () => {
+  const access = testCfAccess();
   let server: ReturnType<typeof createServer>;
   let root: string;
   let bin: string;
@@ -37,7 +38,7 @@ describe("GET /api/agent-catalog", () => {
     const home = join(root, "home");
     mkdirSync(home);
     const agentDetector = new AgentDetector({ locate: catalogLocator({ probe: null }), home, env: {} });
-    server = createServer({ port: 0, hostname: "127.0.0.1", stateDir: state, token: BROWSER_TOKEN, bridgeToken: BRIDGE_TOKEN, machines: false, sidecar: false, tailscaleOwner: null, agentDetector });
+    server = createServer({ port: 0, hostname: "127.0.0.1", stateDir: state, token: "", bridgeToken: BRIDGE_TOKEN, machines: false, sidecar: false, cfAccess: access.cfAccess, tailscaleOwner: null, agentDetector });
   });
   afterEach(() => { process.env["PATH"] = savedPath; });
   afterAll(() => {
@@ -49,7 +50,7 @@ describe("GET /api/agent-catalog", () => {
     writeFileSync(join(bin, "claude"), "#!/bin/sh\necho '2.1.311 (Claude Code)'\n");
     chmodSync(join(bin, "claude"), 0o755);
     process.env["PATH"] = bin;
-    const response = await fetch(url("/api/agent-catalog"), { headers: bearer(BROWSER_TOKEN) });
+    const response = await fetch(url("/api/agent-catalog"), { headers: access.headers() });
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("no-store");
     const body = await response.json() as AgentCatalogResponse;
@@ -64,15 +65,13 @@ describe("GET /api/agent-catalog", () => {
     expect([muse.install, typeof muse.no_install]).toEqual([null, "string"]);
   });
 
-  it("answers a watch device and the connection server's bridge token, and refuses no credential and a write", async () => {
+  it("requires Cloudflare Access for agent-catalog, rejects legacy watch cookies and bridge tokens, and refuses POST", async () => {
     process.env["PATH"] = bin;
     expect((await fetch(url("/api/agent-catalog"))).status).toBe(401);
-    const watched = await fetch(url("/api/agent-catalog"), { headers: { cookie: `ovis_device=${WATCH_TOKEN}`, "x-forwarded-for": "100.64.0.9" } });
-    expect(watched.status).toBe(200);
-    expect((await fetch(url("/api/agent-catalog"), { headers: bearer(BRIDGE_TOKEN) })).status).toBe(200);
-    const watchPost = await fetch(url("/api/agent-catalog"), { method: "POST", headers: { cookie: `ovis_device=${WATCH_TOKEN}`, "x-forwarded-for": "100.64.0.9", origin: url("") } });
-    expect([watchPost.status, ((await watchPost.json()) as { error: { code: string } }).error.code]).toEqual([403, "read_only"]);
-    const post = await fetch(url("/api/agent-catalog"), { method: "POST", headers: { ...bearer(BROWSER_TOKEN), origin: url("") } });
+    expect((await fetch(url("/api/agent-catalog"), { headers: { cookie: `ovis_device=${WATCH_TOKEN}`, "x-forwarded-for": "100.64.0.9" } })).status).toBe(401);
+    expect((await fetch(url("/api/agent-catalog"), { headers: bearer(BRIDGE_TOKEN) })).status).toBe(401);
+    expect((await fetch(url("/api/agent-catalog"), { headers: access.headers() })).status).toBe(200);
+    const post = await fetch(url("/api/agent-catalog"), { method: "POST", headers: access.originHeaders() });
     expect([post.status, ((await post.json()) as { error: { code: string } }).error.code]).toEqual([400, "method_not_allowed"]);
   });
 
@@ -82,29 +81,33 @@ describe("GET /api/agent-catalog", () => {
     process.env["PATH"] = bin;
     const machine = spyOn(runtime, "hcMachine").mockReturnValue({ name: "lab", id: "lab-id" });
     try {
-      const body = await (await fetch(url("/api/agent-catalog"), { headers: bearer(BROWSER_TOKEN) })).json() as AgentCatalogResponse;
+      const body = await (await fetch(url("/api/agent-catalog"), { headers: access.headers() })).json() as AgentCatalogResponse;
       expect(body.platform).toBeNull();
       expect(body.agents.map((agent) => agent.id)).toEqual(AGENT_CATALOG.map((entry) => entry.id));
       for (const agent of body.agents) {
         expect(agent.install).toBeNull();
         expect(agent.state).toEqual({ installed: null, binary: null, on_path: null, version: null, version_error: null, meets_min_version: null });
       }
-      for (const [path, agent] of [["/api/agent-catalog/install", "codex"], ["/api/agent-catalog/sign-in", "claude"]] as const) {
-        const refused = await fetch(url(path), { method: "POST", headers: { ...bearer(BROWSER_TOKEN), origin: url(""), "content-type": "application/json" }, body: JSON.stringify({ agent }) });
-        expect([refused.status, ((await refused.json()) as { error: { code: string } }).error.code]).toEqual([409, "other_machine"]);
-      }
+      const blockedInstall = await fetch(url("/api/agent-catalog/install"), { method: "POST", headers: access.originHeaders({ "content-type": "application/json" }), body: JSON.stringify({ agent: "codex" }) });
+      expect([blockedInstall.status, ((await blockedInstall.json()) as { error: { code: string } }).error.code]).toEqual([403, "disabled_by_policy"]);
+      const refused = await fetch(url("/api/agent-catalog/sign-in"), { method: "POST", headers: access.originHeaders({ "content-type": "application/json" }), body: JSON.stringify({ agent: "claude" }) });
+      expect([refused.status, ((await refused.json()) as { error: { code: string } }).error.code]).toEqual([409, "other_machine"]);
     } finally {
       machine.mockRestore();
     }
   });
 
-  it("reaches another PC's catalog through the PC proxy with that PC's bridge token", async () => {
+  it("disables remote machine catalog proxy routes by policy", async () => {
     process.env["PATH"] = bin;
     const manager = { endpoint: (id: string) => id === "remote" ? { url: url(""), token: BRIDGE_TOKEN } : null, trackTerminal: () => () => {} } as unknown as MachineManager;
-    const response = await handleMachineRequest(new Request("http://127.0.0.1/api/machines/remote/agent-catalog"), manager);
-    expect(response.status).toBe(200);
-    const direct = await (await fetch(url("/api/agent-catalog"), { headers: bearer(BROWSER_TOKEN) })).json();
-    expect(await response.json()).toEqual(direct);
+    const response = await handleMachineRequest(
+      new Request("http://127.0.0.1/api/machines/remote/agent-catalog", { headers: { origin: "http://127.0.0.1" } }),
+      manager,
+      undefined, undefined, false, undefined, undefined, undefined, undefined, false,
+      "http://127.0.0.1",
+    );
+    expect(response.status).toBe(403);
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe("disabled_by_policy");
   });
 });
 
@@ -159,7 +162,8 @@ it("serves the first agent catalog GET from the startup warm cache without anoth
       return { stdout: "2.1.311", stderr: "", exitCode: 0, timedOut: false };
     },
   });
-  const server = createServer({ port: 0, hostname: "127.0.0.1", stateDir: root, token: "", machines: false, sidecar: false, tailscaleOwner: null, agentDetector });
+  const access = testCfAccess();
+  const server = createServer({ port: 0, hostname: "127.0.0.1", stateDir: root, token: "", machines: false, sidecar: false, cfAccess: access.cfAccess, tailscaleOwner: null, agentDetector });
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error("startup catalog signal did not arrive")), 2_000);
@@ -168,8 +172,8 @@ it("serves the first agent catalog GET from the startup warm cache without anoth
     server.warmAgentCatalog();
     await Promise.race([started.promise, deadline]);
     // Startup and unrelated requests do not wait for the held version probe.
-    expect((await fetch(`http://127.0.0.1:${server.port}/api/health?scope=bridge`)).status).toBe(200);
-    const duringWarmup = fetch(`http://127.0.0.1:${server.port}/api/agent-catalog`);
+    expect((await fetch(`http://127.0.0.1:${server.port}/api/health?scope=bridge`, { headers: access.headers() })).status).toBe(200);
+    const duringWarmup = fetch(`http://127.0.0.1:${server.port}/api/agent-catalog`, { headers: access.headers() });
     await Promise.race([overlapping.promise, deadline]);
     release.resolve();
     const overlappingResponse = await Promise.race([duringWarmup, deadline]);
@@ -178,7 +182,7 @@ it("serves the first agent catalog GET from the startup warm cache without anoth
     expect(overlappingBody.agents.find((agent) => agent.id === "claude")?.state.version).toBe("2.1.311");
     await Promise.race([warmed.promise, deadline]);
     expect(reads).toBe(1);
-    const response = await fetch(`http://127.0.0.1:${server.port}/api/agent-catalog`);
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/agent-catalog`, { headers: access.headers() });
     const body: AgentCatalogResponse = await response.json();
     expect(response.status).toBe(200);
     expect(body.agents.find((agent) => agent.id === "claude")?.state.version).toBe("2.1.311");
@@ -224,13 +228,14 @@ it("a GET during the warm-up joins its version reads: no agent's --version runs 
       return { stdout: "1.0.0", stderr: "", exitCode: 0, timedOut: false };
     },
   });
-  const server = createServer({ port: 0, hostname: "127.0.0.1", stateDir: root, token: "", machines: false, sidecar: false, tailscaleOwner: null, agentDetector });
+  const access = testCfAccess();
+  const server = createServer({ port: 0, hostname: "127.0.0.1", stateDir: root, token: "", machines: false, sidecar: false, cfAccess: access.cfAccess, tailscaleOwner: null, agentDetector });
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("the catalog did not answer")), 3_000); });
   try {
     server.warmAgentCatalog();
     await Promise.race([first.promise, deadline]);
-    const during = fetch(`http://127.0.0.1:${server.port}/api/agent-catalog`);
+    const during = fetch(`http://127.0.0.1:${server.port}/api/agent-catalog`, { headers: access.headers() });
     // the GET has asked for every agent before any read of the warm-up finished
     await Promise.race([bothAsked.promise, deadline]);
     release.resolve();
@@ -251,7 +256,8 @@ it("does not warm the agent catalog until explicitly requested", () => {
   const root = mkdtempSync(join(tmpdir(), "ovis-catalog-no-warm-"));
   const agentDetector = new AgentDetector({ locate: async () => null, home: root, env: {} });
   const state = spyOn(agentDetector, "state");
-  const server = createServer({ port: 0, hostname: "127.0.0.1", stateDir: root, token: "", machines: false, sidecar: false, tailscaleOwner: null, agentDetector });
+  const access = testCfAccess();
+  const server = createServer({ port: 0, hostname: "127.0.0.1", stateDir: root, token: "", machines: false, sidecar: false, cfAccess: access.cfAccess, tailscaleOwner: null, agentDetector });
   try {
     expect(state).not.toHaveBeenCalled();
   } finally {
@@ -268,7 +274,8 @@ it("logs a failed startup catalog warm-up and keeps serving requests", async () 
     if (typeof message === "string" && message.includes("agent catalog warm-up failed: fixture lookup failed")) logged.resolve();
   });
   const agentDetector = new AgentDetector({ locate: async () => { throw new Error("fixture lookup failed"); }, home: root, env: {} });
-  const server = createServer({ port: 0, hostname: "127.0.0.1", stateDir: root, token: "", machines: false, sidecar: false, tailscaleOwner: null, agentDetector });
+  const access = testCfAccess();
+  const server = createServer({ port: 0, hostname: "127.0.0.1", stateDir: root, token: "", machines: false, sidecar: false, cfAccess: access.cfAccess, tailscaleOwner: null, agentDetector });
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error("warm-up failure was not logged")), 2_000);
@@ -278,7 +285,7 @@ it("logs a failed startup catalog warm-up and keeps serving requests", async () 
     await Promise.race([logged.promise, deadline]);
     expect(log).toHaveBeenCalledTimes(1);
     expect(log).toHaveBeenCalledWith(expect.stringContaining("agent catalog warm-up failed: fixture lookup failed"));
-    expect((await fetch(`http://127.0.0.1:${server.port}/api/health?scope=bridge`)).status).toBe(200);
+    expect((await fetch(`http://127.0.0.1:${server.port}/api/health?scope=bridge`, { headers: access.headers() })).status).toBe(200);
   } finally {
     clearTimeout(timer);
     server.stop();
@@ -321,7 +328,8 @@ it.skipIf(process.platform === "win32")("kills held warm-up processes on stop wi
     locate: async (binary) => binaries.has(binary) ? join(root, binary) : null, home: root, env: {},
     run: (...args) => { versionRuns++; return runVersion(...args); },
   });
-  const server = createServer({ port: 0, hostname: "127.0.0.1", stateDir: root, token: "", machines: false, sidecar: false, tailscaleOwner: null, agentDetector });
+  const access = testCfAccess();
+  const server = createServer({ port: 0, hostname: "127.0.0.1", stateDir: root, token: "", machines: false, sidecar: false, cfAccess: access.cfAccess, tailscaleOwner: null, agentDetector });
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error("warm-up processes did not start or stop")), 5_000);

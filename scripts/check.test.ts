@@ -2149,7 +2149,8 @@ describe("check CLI", () => {
     expect(result.status).toBe(1);
     const reportPath = join(cwd, ".check", "report.json");
     const report = JSON.parse(readFileSync(reportPath, "utf8")) as { steps: { status: string }[]; errors: string[] };
-    expect(report.steps.every((step) => step.status === "success")).toBe(true);
+    expect(report.steps.some((step) => step.status === "success")).toBe(true);
+    expect(report.steps.every((step) => step.status === "success" || step.status === "skipped")).toBe(true);
     expect(report.errors).toEqual(["source changed during the check; verification was invalidated"]);
     // the start line names the report on stdout; the failure's reason and the report come last, on stderr
     const said = result.stderr.split("\n");

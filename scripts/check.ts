@@ -1781,6 +1781,10 @@ async function actionlint(
   skip: (reason: string) => void,
   fail: (message: string) => void,
 ): Promise<number> {
+  if (!existsSync(".github/workflows")) {
+    skip("no .github/workflows directory in this fork");
+    return 0;
+  }
   if (process.platform !== "linux" || process.arch !== "x64") {
     skip("actionlint is pinned for Linux x64; CI checks workflow syntax on other platforms");
     return 0;

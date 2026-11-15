@@ -104,9 +104,18 @@ describe("a supervisor started by the launcher of an install from before the ren
           process.exit(3);
         }
         bootId = options.env.OVIS_BOOT_ID;
-        return { exitCode: null, kill() {}, exited: Promise.resolve(0), send() {} };
+        const proc = {
+          exitCode: null,
+          kill() {},
+          exited: Promise.resolve(0),
+          send(message: { type?: string } | undefined) {
+            if (message?.type === "bridge-health-probe") {
+              queueMicrotask(() => options.ipc?.({ type: "bridge-health-answer", boot_id: bootId, runtime: "herdr", runtime_ok: true }, proc as never));
+            }
+          },
+        };
+        return proc;
       }) as typeof Bun.spawn;
-      globalThis.fetch = (async () => ({ ok: true, json: async () => ({ web_ui: { boot_id: bootId } }) })) as unknown as typeof fetch;
       const { runSupervisor } = await import(${JSON.stringify(join(import.meta.dir, "supervisor.ts"))});
       await runSupervisor(process.env.OVIS_SOURCE_ROOT);
       ${afterStart}

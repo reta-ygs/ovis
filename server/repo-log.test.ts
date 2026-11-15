@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { ApiError, RepoBranches, RepoCommitDetail, RepoDiffFileList, RepoLog } from "../shared/protocol.ts";
 import { DeviceStore } from "./devices.ts";
 import { createServer } from "./index.ts";
+import { testCfAccess } from "./cf-access.fake.ts";
 import { MACHINE_PROXY_PATH } from "./machine-api.ts";
 import { repoDiffFile, repoDiffFiles } from "./repo-diff.ts";
 import { REPO_LOG_MAX_LIMIT, repoBranches, repoCommit, repoLog } from "./repo-log.ts";
@@ -217,12 +218,13 @@ describe("GET /api/workspace/git/show", () => {
 });
 
 describe("the /api/workspace/git routes over HTTP", () => {
+  const access = testCfAccess();
   let root: string;
   let server: ReturnType<typeof createServer>;
   let base: string;
   let watchCookie: string;
   const stateDir = mkdtempSync(join(tmpdir(), "ovis-repo-log-state-"));
-  const owner = { authorization: "Bearer test-repo-log" };
+  const owner = access.headers();
   beforeAll(() => {
     root = repository("http");
     commit(root, "first", 1_700_000_000);
@@ -230,7 +232,7 @@ describe("the /api/workspace/git routes over HTTP", () => {
     const watchToken = store.pair(store.startPairing().code, "Watch", "watch")!.token;
     expect(store.match(watchToken)).not.toBeNull();
     watchCookie = `ovis_device=${watchToken}`;
-    server = createServer({ port: 0, stateDir, token: "test-repo-log", tailscaleOwner: null, machines: false });
+    server = createServer({ port: 0, stateDir, token: "", tailscaleOwner: null, machines: false, cfAccess: access.cfAccess });
     base = `http://127.0.0.1:${server.port}`;
   });
   afterAll(() => { server.stop(); rmSync(stateDir, { recursive: true, force: true }); });
@@ -253,23 +255,25 @@ describe("the /api/workspace/git routes over HTTP", () => {
       const response = await fetch(`${base}/api/workspace/${search}`, { headers: owner });
       expect([search, response.status, ((await response.json()) as ApiError).error.code]).toEqual([search, status, code]);
     }
-    const posted = await fetch(`${base}/api/workspace/git/log?${directory()}`, { method: "POST", headers: { ...owner, "x-herdr-machine": "1" } });
+    const posted = await fetch(`${base}/api/workspace/git/log?${directory()}`, { method: "POST", headers: access.originHeaders({ "x-herdr-machine": "1" }) });
     expect(posted.status).toBe(400);
     expect(((await posted.json()) as ApiError).error.code).toBe("method_not_allowed");
     const files = await fetch(`${base}/api/workspace/diff/files?${directory()}&scope=commit&base=${EMPTY_TREE}&head=HEAD`, { headers: owner });
     expect(((await files.json()) as RepoDiffFileList).files.map((file) => file.path)).toEqual(["a.txt"]);
   });
 
-  it("is closed to another site's page and to a device that can only watch, here and through a PC's route", async () => {
+  it("is closed to another site's page, rejects legacy watch cookies without Cloudflare Access, and refuses remote machine routes on a bridge-only server", async () => {
     const crossSite = await fetch(`${base}/api/workspace/git/log?${directory()}`, { headers: { ...owner, "sec-fetch-site": "cross-site" } });
     expect(crossSite.status).toBe(403);
     expect(((await crossSite.json()) as ApiError).error.code).toBe("cross_site");
     for (const route of ["log", "branches", "show"]) {
       expect([route, MACHINE_PROXY_PATH.test(`workspace/git/${route}`)]).toEqual([route, true]);
       for (const path of [`workspace/git/${route}`, `machines/pc1/workspace/git/${route}`]) {
-        const response = await fetch(`${base}/api/${path}?${directory()}&rev=HEAD`, { headers: { cookie: watchCookie } });
-        expect([path, response.status, ((await response.json()) as ApiError).error.code]).toEqual([path, 403, "read_only"]);
+        const noJwt = await fetch(`${base}/api/${path}?${directory()}&rev=HEAD`, { headers: { cookie: watchCookie } });
+        expect([path, noJwt.status, ((await noJwt.json()) as ApiError).error.code]).toEqual([path, 401, "cf_access_required"]);
       }
+      const remote = await fetch(`${base}/api/machines/pc1/workspace/git/${route}?${directory()}&rev=HEAD`, { headers: owner });
+      expect([route, remote.status, ((await remote.json()) as ApiError).error.code]).toEqual([route, 404, "bridge_only"]);
     }
     expect(MACHINE_PROXY_PATH.test("workspace/git/other")).toBe(false);
   });

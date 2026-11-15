@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import * as herdr from "./herdr/client.ts";
 import { HerdrError } from "./herdr/client.ts";
+import { testCfAccess, type TestCfFixture } from "./cf-access.fake.ts";
 import { errorResponse } from "./http.ts";
 import { createServer } from "./index.ts";
 
@@ -37,15 +38,17 @@ describe("pane find HTTP validation", () => {
   const previous = { start: { row: 0, col: 0 }, end: { row: 0xffffffff, col: 0xffff } };
   let server: ReturnType<typeof createServer>;
   let stateDir: string;
+  let access: TestCfFixture;
   const find = spyOn(herdr, "paneFind").mockImplementation(async () => {
     throw new HerdrError("stale_content", "search content changed");
   });
   const post = (patch: Record<string, unknown>) => fetch(`http://127.0.0.1:${server.port}/api/pane/find`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...request, ...patch }),
+    method: "POST", headers: access.originHeaders({ "content-type": "application/json" }), body: JSON.stringify({ ...request, ...patch }),
   });
-  beforeAll(() => {
+  beforeAll(async () => {
+    access = await testCfAccess();
     stateDir = mkdtempSync(join(tmpdir(), "herdr-find-http-"));
-    server = createServer({ port: 0, hostname: "127.0.0.1", stateDir, token: "", machines: false, sidecar: false });
+    server = createServer({ port: 0, hostname: "127.0.0.1", stateDir, machines: false, sidecar: false, cfAccess: access.cfAccess });
   });
   afterEach(() => find.mockClear());
   afterAll(() => {
