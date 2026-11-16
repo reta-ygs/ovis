@@ -24,35 +24,46 @@ export function processStartedAt(pid: number): number | null {
   return linuxBirth(pid);
 }
 
-function linuxStatTicks(pid: number): number | null {
+export interface LinuxProcDeps {
+  readProc?: (path: string) => string;
+  now?: () => number;
+}
+
+const defaultReadProc = (path: string): string => readFileSync(path, "utf8");
+
+function linuxStatTicks(pid: number, readProc: (path: string) => string = defaultReadProc): number | null {
   try {
-    const ticks = Number(readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").pop()!.split(" ")[19]);
+    const ticks = Number(readProc(`/proc/${pid}/stat`).split(") ").pop()!.split(" ")[19]);
     return Number.isFinite(ticks) ? ticks : null;
   } catch {
     return null;
   }
 }
 
-function linuxBirthFromTicks(ticks: number): number | null {
+function linuxBirthFromTicks(ticks: number, readProc: (path: string) => string = defaultReadProc): number | null {
   try {
-    const boot = Number(readFileSync("/proc/stat", "utf8").match(/^btime (\d+)$/m)?.[1]);
+    const boot = Number(readProc("/proc/stat").match(/^btime (\d+)$/m)?.[1]);
     return Number.isFinite(boot) ? boot * 1000 + ticks * 10 : null;
   } catch {
     return null;
   }
 }
 
-function linuxRawUptimeStart(ticks: number, now: number, birth: number | null): number | null {
+function readLinuxUptimeMs(readProc: (path: string) => string = defaultReadProc): number | null {
   try {
-    const uptime = Number(readFileSync("/proc/uptime", "utf8").split(" ")[0]);
-    const raw = now - uptime * 1000 + ticks * 10;
-    // Ignore /proc/uptime when virtualized (e.g. LXCFS container uptime vs host starttime ticks).
-    if (!Number.isFinite(raw) || raw > now + 20) return null;
-    if (birth !== null && (raw < birth - 50 || raw > birth + 1050)) return null;
-    return raw;
+    const uptime = Number(readProc("/proc/uptime").split(" ")[0]);
+    return Number.isFinite(uptime) ? uptime * 1000 : null;
   } catch {
     return null;
   }
+}
+
+function computeLinuxUptimeStart(ticks: number, uptimeMs: number, now: number, birth: number | null): number | null {
+  const raw = now - uptimeMs + ticks * 10;
+  // Ignore /proc/uptime when virtualized (e.g. LXCFS container uptime vs host starttime ticks).
+  if (!Number.isFinite(raw) || raw > now + 20) return null;
+  if (birth !== null && (raw < birth - 50 || raw > birth + 1050)) return null;
+  return raw;
 }
 
 /**
@@ -60,9 +71,9 @@ function linuxRawUptimeStart(ticks: number, now: number, birth: number | null): 
  * process's identity (pending input compares it exactly); but `btime` is whole seconds and stays
  * where it was when the clock is stepped later, so it may be up to a second before the real start.
  */
-function linuxBirth(pid: number): number | null {
-  const ticks = linuxStatTicks(pid);
-  return ticks === null ? null : linuxBirthFromTicks(ticks);
+function linuxBirth(pid: number, readProc: (path: string) => string = defaultReadProc): number | null {
+  const ticks = linuxStatTicks(pid, readProc);
+  return ticks === null ? null : linuxBirthFromTicks(ticks, readProc);
 }
 
 /**
@@ -103,24 +114,27 @@ export async function processStartedAtAsync(pid: number): Promise<number | null>
  * processStartUpperBound for a caller that awaits it; every platform's read is synchronous now.
  * Where no start time is known (Windows), null.
  */
-export async function processStartUpperBoundAsync(pid: number): Promise<number | null> {
+export async function processStartUpperBoundAsync(pid: number, deps?: LinuxProcDeps): Promise<number | null> {
   if (process.platform !== "linux" && process.platform !== "darwin") return null;
-  return processStartUpperBound(pid);
+  return processStartUpperBound(pid, deps);
 }
 
 /** An upper bound for comparing a new thread's timestamp, without btime's whole-second loss. */
-export function processStartUpperBound(pid: number): number | null {
+export function processStartUpperBound(pid: number, deps: LinuxProcDeps = {}): number | null {
   if (process.platform !== "linux") {
     const started = processStartedAt(pid);
     return started === null ? null : started + 1000;
   }
-  const ticks = linuxStatTicks(pid);
+  const readProc = deps.readProc ?? defaultReadProc;
+  const getNow = deps.now ?? Date.now;
+  const ticks = linuxStatTicks(pid, readProc);
   if (ticks === null) return null;
-  const now = Date.now();
-  const birth = linuxBirthFromTicks(ticks);
-  const raw = linuxRawUptimeStart(ticks, now, birth);
-  // uptime and start ticks truncate to 10ms. Reading the wall clock last and adding
-  // one tick bounds the process start from above, rather than admitting older threads.
+  const birth = linuxBirthFromTicks(ticks, readProc);
+  const uptimeMs = readLinuxUptimeMs(readProc);
+  // Capture the wall clock AFTER reading /proc/stat and /proc/uptime so read latency
+  // shifts the bound upward rather than admitting older threads or breaking send checks.
+  const now = getNow();
+  const raw = uptimeMs === null ? null : computeLinuxUptimeStart(ticks, uptimeMs, now, birth);
   if (raw !== null) return raw + 10;
   return birth === null ? null : Math.min(now + 10, birth + 1010);
 }
@@ -130,12 +144,17 @@ export function processStartUpperBound(pid: number): number | null {
  * the real start, but a little different on each read, so never an identity. The wall clock is read
  * first: the uptime read after it is at most one tick late.
  */
-function linuxReadStart(pid: number): number | null {
-  const ticks = linuxStatTicks(pid);
+function linuxReadStart(pid: number, deps: LinuxProcDeps = {}): number | null {
+  const readProc = deps.readProc ?? defaultReadProc;
+  const getNow = deps.now ?? Date.now;
+  const ticks = linuxStatTicks(pid, readProc);
   if (ticks === null) return null;
-  const now = Date.now();
-  const birth = linuxBirthFromTicks(ticks);
-  return linuxRawUptimeStart(ticks, now, birth);
+  const birth = linuxBirthFromTicks(ticks, readProc);
+  // Capture the wall clock immediately BEFORE reading /proc/uptime so read latency
+  // shifts the lower bound downward rather than overestimating the start time.
+  const now = getNow();
+  const uptimeMs = readLinuxUptimeMs(readProc);
+  return uptimeMs === null ? null : computeLinuxUptimeStart(ticks, uptimeMs, now, birth);
 }
 
 /**
@@ -146,11 +165,12 @@ function linuxReadStart(pid: number): number | null {
  * out, and two Codex panes of one directory with short answers both said they could not tell. An older thread let in with it makes two begun
  * since, and two tell nothing.
  */
-export function processStartLowerBound(pid: number): number | null {
+export function processStartLowerBound(pid: number, deps: LinuxProcDeps = {}): number | null {
   if (process.platform === "darwin") return darwinStart(pid);
   if (process.platform !== "linux") return null;
+  const readProc = deps.readProc ?? defaultReadProc;
   // the earlier of both readings, less one tick: no later than the real start (the uptime's), nor
   // than the start processStartedAt tells (btime's), so a thread made as the process starts is in
-  const starts = [linuxBirth(pid), linuxReadStart(pid)].filter((start): start is number => start !== null);
+  const starts = [linuxBirth(pid, readProc), linuxReadStart(pid, deps)].filter((start): start is number => start !== null);
   return starts.length === 0 ? null : Math.min(...starts) - 10;
 }

@@ -161,15 +161,20 @@ export async function runSupervisor(root = ROOT) {
         }
       },
       onExit(proc, code) {
+        if (proc === candidate) {
+          wakeProbe?.();
+          wakeProbe = null;
+        }
         if (child === proc && !switching && !stopping) {
-          console.error(`Bridge exited unexpectedly (${code}).`);
+          console.error(`Bridge exited unexpectedly (${code ?? proc.signalCode}).`);
           void shutdown(1);
         }
       },
     });
     child = candidate;
+    const aborted = () => stopping || (candidate.exitCode ?? null) !== null || (candidate.signalCode ?? null) !== null || child !== candidate;
     const deadline = Date.now() + 20_000;
-    while (Date.now() < deadline && !stopping && candidate.exitCode === null) {
+    while (Date.now() < deadline && !aborted()) {
       healthAnswer = null;
       let finish = () => {};
       const answered = new Promise<void>((resolve) => {
@@ -190,16 +195,21 @@ export async function runSupervisor(root = ROOT) {
         finish();
       }
       await answered;
+      if (aborted()) break;
       const answer = healthAnswer as { boot_id?: string; runtime?: string; runtime_ok?: boolean } | null;
       if (answer?.boot_id === bootId) {
         // only herdr's TUI may be stopped at a good start: a runtime the bridge started itself, any other, must answer
         const ready = answer.runtime_ok === true || ((answer.runtime === undefined || answer.runtime === "herdr") && !(await herdrMayListen(socketPath)));
+        if (aborted()) break;
         if (ready) {
-          try { candidate.send({ type: "bridge-accepted" }); } catch { /* it reads as not taken, and a page waits on */ }
+          let accepted = true;
+          try { candidate.send({ type: "bridge-accepted" }); } catch { accepted = false; }
+          if (!accepted || aborted()) break;
           publish();
           return;
         }
       }
+      if (aborted()) break;
       await Bun.sleep(100);
     }
     await stopChild();
@@ -213,12 +223,15 @@ export async function runSupervisor(root = ROOT) {
     return run;
   }
   /** A bridge that exited while a change held `switching` was not seen by onExit: it is now. */
-  function checkBridge() {
+  function checkBridge(): boolean {
+    if (stopping) return false;
     // a change that failed outright cleared `child` (stopChild): no bridge is as gone as an exited one
-    if (!stopping && (child === null || child.exitCode !== null)) {
-      console.error(child === null ? "No bridge is running after a failed change." : `Bridge exited unexpectedly (${child.exitCode}).`);
+    if (child === null || (child.exitCode ?? null) !== null || (child.signalCode ?? null) !== null) {
+      console.error(child === null ? "No bridge is running after a failed change." : `Bridge exited unexpectedly (${child.exitCode ?? child.signalCode}).`);
       void shutdown(1);
+      return false;
     }
+    return true;
   }
   /**
    * One server, one runtime: the bridge stops, and the next one reads the saved choice as it starts,
@@ -309,6 +322,7 @@ export async function runSupervisor(root = ROOT) {
       await launch(active);
     }
     switching = false;
+    if (!checkBridge() || stopping) return;
     started.resolve();
     updater.start();
     // a stop that came during the start already waited for no try: none starts after it
@@ -317,6 +331,7 @@ export async function runSupervisor(root = ROOT) {
       const done = installMissingRustHost(active.directory, rustHostInstall.signal);
       if (done !== null) rustHostTry = { directory: active.directory, done };
     }
+    if (stopping) return;
     process.send?.({ type: "supervisor-ready" });
     console.log(`Managed updates: ${updater.status.auto_update ? "automatic install" : "automatic checks, install from Settings"}`);
   } catch (error) {

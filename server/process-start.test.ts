@@ -84,4 +84,50 @@ describe("process start time", () => {
       expect(lower).toBeGreaterThanOrEqual(before - 1030);
     } finally { child.kill(); }
   });
+
+  it.skipIf(process.platform !== "linux")("samples Date.now after slow proc reads for upper bound and before /proc/uptime for lower bound", () => {
+    // Boot at 1_700_000_000_000 ms (btime = 1_700_000_000 s), process started at 10050 ticks (+500 ms -> 1_700_000_100_500 ms).
+    const statLine = `123 (bun) ${["S", ...Array(18).fill("0"), "10050", "0", "0"].join(" ")}`;
+    let clock = 1_700_000_101_000;
+    const readProc = (path: string) => {
+      if (path === "/proc/123/stat") return statLine;
+      if (path === "/proc/stat") {
+        // Simulate 100 ms stall reading /proc/stat before reading /proc/uptime.
+        clock += 100;
+        return "btime 1700000000\n";
+      }
+      if (path === "/proc/uptime") {
+        clock += 20;
+        // Kernel uptime at read time: (clock - 1_700_000_000_000) / 1000 = 101.12 s.
+        return `${((clock - 1_700_000_000_000) / 1000).toFixed(2)} 0.00\n`;
+      }
+      throw new Error(`unexpected path: ${path}`);
+    };
+    const actualStart = 1_700_000_100_500;
+    const upper = processStartUpperBound(123, { readProc, now: () => clock });
+    expect(upper).not.toBeNull();
+    expect(upper!).toBeGreaterThanOrEqual(actualStart);
+    expect(upper!).toBe(actualStart + 10);
+
+    // Lower bound captures clock immediately before /proc/uptime, so /proc/uptime latency biases it downward.
+    clock = 1_700_000_102_000;
+    const lower = processStartLowerBound(123, { readProc, now: () => clock });
+    expect(lower).not.toBeNull();
+    expect(lower!).toBeLessThanOrEqual(actualStart - 10);
+
+    // LXCFS / missing uptime fallback also uses post-read wall clock.
+    let lxcfsClock = 1_700_000_100_500;
+    const fallbackUpper = processStartUpperBound(123, {
+      readProc(path) {
+        if (path === "/proc/123/stat") return statLine;
+        if (path === "/proc/stat") { lxcfsClock += 100; return "btime 1700000000\n"; }
+        if (path === "/proc/uptime") return "0.05 0.00\n";
+        throw new Error(`unexpected path: ${path}`);
+      },
+      now: () => lxcfsClock,
+    });
+    expect(fallbackUpper).not.toBeNull();
+    expect(fallbackUpper!).toBe(1_700_000_100_610);
+    expect(fallbackUpper!).toBeGreaterThanOrEqual(actualStart);
+  });
 });
