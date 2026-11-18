@@ -35,6 +35,8 @@ Ovis runs on the computer where your agents work, and your phone or any browser 
 
 ## Install
 
+**Nix:** see the [Nix package guide](docs/nix.md) for this fork's x86_64-linux package.
+
 **Desktop app:** [Mac](https://ovis.sh/Ovis-mac-arm64.dmg) ([Intel](https://ovis.sh/Ovis-mac-x64.dmg)) · [Windows](https://ovis.sh/Ovis-win-x64.exe) · [Linux](https://ovis.sh/Ovis-linux-x64.deb) ([all builds](docs/guide.md#the-desktop-app)). It needs nothing else, and its terminals are its own: to see the ones you already have in herdr or the Herdr app, install with the command below instead.
 
 **With herdr or the Herdr app:** one command sets Ovis up beside it. On Linux or macOS:
