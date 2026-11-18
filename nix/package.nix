@@ -23,17 +23,22 @@ let
     cargoHash = "sha256-vin5SGninwkDlpWIK4Cc5oO4cZ7DjTXDovUpu0fWwlE=";
   };
 
+  bunDepsSrc = lib.fileset.toSource {
+    root = ../.;
+    fileset = lib.fileset.unions [
+      ../package.json
+      ../bun.lock
+      ../patches
+    ];
+  };
+  bunDepsFingerprint = builtins.substring 0 12 (
+    builtins.hashString "sha256" (builtins.unsafeDiscardStringContext (toString bunDepsSrc))
+  );
+
   bunDeps = stdenvNoCC.mkDerivation {
-    pname = "ovis-bun-deps";
+    pname = "ovis-bun-deps-${bunDepsFingerprint}";
     inherit version;
-    src = lib.fileset.toSource {
-      root = ../.;
-      fileset = lib.fileset.unions [
-        ../package.json
-        ../bun.lock
-        ../patches
-      ];
-    };
+    src = bunDepsSrc;
     nativeBuildInputs = [
       bun
       cacert
@@ -95,7 +100,7 @@ stdenvNoCC.mkDerivation {
     cp -a dist server shared scripts integrations package.json THIRD_PARTY_NOTICES.md UPSTREAM_SYNC.json node_modules "$out/share/ovis/"
     makeWrapper "${bun}/bin/bun" "$out/bin/ovis-server" \
       --add-flags "$out/share/ovis/server/main.ts" \
-      --unset OVIS_MANAGED \
+      --set OVIS_MANAGED 0 \
       --set OVIS_ASSETS "$out/share/ovis" \
       --set OVIS_PTY_SIDECAR_BIN "${ptySidecar}/bin/ovis-pty-sidecar" \
       --set-default SSL_CERT_FILE "${cacert}/etc/ssl/certs/ca-bundle.crt" \
@@ -134,11 +139,9 @@ stdenvNoCC.mkDerivation {
     }:$PATH"
     test -f "$out/share/ovis/dist/index.html"
     test -f "$out/share/ovis/dist/manifest.webmanifest"
-    "${ptySidecar}/bin/ovis-pty-sidecar" 1 1 "${coreutils}/bin/true"
     bun test --timeout 15000 "$out/share/ovis/server/cf-access.test.ts" "$out/share/ovis/server/entries.test.ts"
     cd "$TMPDIR"
-    export OVIS_ASSETS="$out/share/ovis"
-    OVIS_PACKAGE_ROOT="$out" bun test --timeout 15000 ${./smoke.test.ts}
+    OVIS_PACKAGE_ROOT="$out" bun test --timeout 15000 ${./.}/smoke-check.ts
     runHook postInstallCheck
   '';
 

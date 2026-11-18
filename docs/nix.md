@@ -13,16 +13,29 @@ hc daemon must be available to the same user on the same socket.
 
 This fork requires a loopback host and Cloudflare Access configuration. Set
 `OVIS_CF_ACCESS_TEAM_DOMAIN`, `OVIS_CF_ACCESS_AUD`, `OVIS_CF_ACCESS_ALLOWED_EMAILS`,
-and `OVIS_PUBLIC_ORIGIN`; the public origin must use HTTPS. Set `OVIS_STATE_DIR`
-to a location outside the Nix store.
+and `OVIS_PUBLIC_ORIGIN`; the public origin must use HTTPS. Route that public
+host through Cloudflare Access to the loopback listener, for example using
+Cloudflare Tunnel, and open the protected public HTTPS URL. Setting the public
+origin alone does not set up ingress. A direct request to the loopback listener
+without `Cf-Access-Jwt-Assertion` receives 401. Set `OVIS_STATE_DIR` to a
+location outside the Nix store.
 
 The package builds the client with the frozen `bun.lock` and patches and builds
 the Rust PTY from the committed `Cargo.lock`. It runs the server from source with
-bundled Bun and the Rust PTY. The wrapper preserves existing PATH choices and
+bundled Bun and the Rust PTY, but does not bundle or guarantee Node or the Node
+`node-pty` fallback. Do not set `OVIS_PTY_SIDECAR=node` for this package unless
+you separately supply a tested, working fallback. If the Rust PTY is unavailable
+and Node is absent, herdr panes are mirrored and explicit PTY requests fail with
+a clear no-PTY-host error. Herdr-core terminal attach instead streams over hc and
+needs no PTY host.
+
+The wrapper preserves existing PATH choices and
 appends coreutils, git, gh, openssh and tar. Its `extraPackages` override defaults
 to an empty list; a consumer can supply runtime CLIs, for example with
 `extraPackages = [ herdrCore ];` when `herdrCore` is defined by that consumer.
-Alternatively, set `OVIS_HC_BIN` explicitly.
+Serving herdr terminals requires the herdr CLI on the service PATH, such as via
+`extraPackages`, or an absolute path in `OVIS_HERDR_BIN`; socket access alone is
+not enough. For hc discovery, alternatively set `OVIS_HC_BIN` explicitly.
 For herdr-core, also set `OVIS_RUNTIME=herdr-core`; the executable override alone
 only tells Ovis where to find hc. Keep the existing `HC_SESSION` / `HC_SOCKET`
 configuration for that daemon. `HERDR_SOCKET` selects a herdr socket, not an hc socket.

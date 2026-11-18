@@ -136,6 +136,7 @@ describe("names from before Ovis", () => {
   const CARRY_OVER: Record<string, string> = {
     "server/legacy-env.ts": "maps each old setting to its new name",
     "server/legacy-env.test.ts": "tests that mapping",
+    "nix/smoke-check.ts": "tests that the packaged launcher ignores managed mode from an earlier install",
     "src/lib/legacyStorage.ts": "moves old browser storage keys",
     "src/lib/legacyStorage.test.ts": "tests that move",
     "server/auth.ts": "still accepts and clears the old cookies",
