@@ -18,10 +18,8 @@ describe("GET /api/agents", () => {
   let server: ReturnType<typeof createServer>;
   let stateDir: string;
   let bin: string;
-  // installers' folders are looked up under this home, never the user's
   let emptyHome: string;
   const savedPath = process.env["PATH"];
-  // the shell-started agents this server finds: gjc and DeepSeek Harness's dsh-tui here, omo not
   const located: string[] = [];
   const shellAgents = { executable: async (kind: string) => { located.push(kind); return kind === "gjc" || kind === "dsh-tui" ? `/opt/${kind}/bin/${kind}` : null; }, stop: async () => undefined } as unknown as ShellAgentLocator;
   const manifests = spyOn(herdr, "agentManifests").mockImplementation(async () => ({ manifests: [{ agent: "codex" }, { agent: "pi" }, { agent: "someagent" }, { agent: "cmd" }, { agent: "copilot" }, { agent: "letta" }] }) as unknown as Awaited<ReturnType<typeof herdr.agentManifests>>);
@@ -31,7 +29,6 @@ describe("GET /api/agents", () => {
     stateDir = mkdtempSync(join(tmpdir(), "ovis-agents-route-"));
     bin = mkdtempSync(join(tmpdir(), "ovis-agents-bin-"));
     emptyHome = mkdtempSync(join(tmpdir(), "ovis-agents-empty-home-"));
-    // only codex is on this server's PATH
     writeFileSync(join(bin, "codex"), "#!/bin/sh\n");
     chmodSync(join(bin, "codex"), 0o755);
     server = createServer({ port: 0, hostname: "127.0.0.1", stateDir, token: "", machines: false, sidecar: false, cfAccess: access.cfAccess, shellAgents, agentDetector: new AgentDetector({ home: emptyHome, locate: async () => null }) });
@@ -66,7 +63,6 @@ describe("GET /api/agents", () => {
         { kind: "someagent", label: "someagent", installed: false },
       ],
     });
-    // dsh-tui is on the locator's PATH, but dsh, which it needs to run, is nowhere: not offered, and not looked for
     expect(located.sort()).toEqual(["gjc", "omo"]);
   });
 
@@ -134,11 +130,9 @@ describe("GET /api/agents", () => {
       chmodSync(join(home, dir, binary), 0o755);
     }
     manifests.mockImplementation(async () => ({ manifests: [{ agent: "opencode" }] }) as unknown as Awaited<ReturnType<typeof herdr.agentManifests>>);
-    // the shell-agent locator keeps a login PATH from before the install: reading it again finds omo
     let fresh = false;
     let refreshes = 0;
     const shellLocator = { executable: async (kind: string) => kind === "omo" && fresh ? join(home, ".local/bin/omo") : null, refresh: async () => { refreshes += 1; fresh = true; }, stop: async () => undefined } as unknown as ShellAgentLocator;
-    // opencode's folder is on no PATH this server reads, however often it is read
     const detector = new AgentDetector({ home, locate: async () => null });
     const found = createServer({ port: 0, hostname: "127.0.0.1", stateDir, token: "", machines: false, sidecar: false, cfAccess: access.cfAccess, shellAgents: shellLocator, agentDetector: detector });
     try {
@@ -148,7 +142,6 @@ describe("GET /api/agents", () => {
       expect(first.find((agent) => agent.kind === "omo")?.installed).toBe(true);
       expect(first.find((agent) => agent.kind === "opencode")?.installed).toBe(false);
       expect(refreshes).toBe(1);
-      // a later read does not ask the login shell again for the same install
       await read();
       expect(refreshes).toBe(1);
     } finally {

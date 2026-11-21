@@ -7,8 +7,6 @@ import { request } from "node:http";
 import { testCfAccess, type TestCfFixture } from "./cf-access.fake.ts";
 import { createServer } from "./index.ts";
 
-// serveStatic reads this checkout's dist/. Without a build, stand one up for the test and take it
-// down again; a real build is left exactly as it is.
 const dist = join(import.meta.dir, "..", "dist");
 const standIn = !existsSync(join(dist, "index.html"));
 
@@ -37,7 +35,6 @@ describe("GET /manifest.webmanifest", () => {
     if (standIn) rmSync(dist, { recursive: true, force: true });
   });
 
-  // fetch() will not send a Host of its own choosing, so ask over node:http.
   const get = (headers: Record<string, string> = {}) => new Promise<{ status: number; cache: string | undefined; json: Record<string, unknown> }>((resolve, reject) => {
     request({ host: "127.0.0.1", port: server.port, path: "/manifest.webmanifest", headers: access.headers(headers) }, res => {
       let text = "";

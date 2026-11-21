@@ -1,5 +1,6 @@
 import { subscribeMachineEvents } from "./machine-events.ts";
-import type { DevicePairedEvent, DeviceRemovedEvent, MachineRoster, RelayPairingsEvent, RemotePairingsEvent } from "../shared/machines.ts";
+import { wireMachine, wireMachineEvent, type WireMachine } from "../shared/compact-agents.ts";
+import type { DevicePairedEvent, DeviceRemovedEvent, MachineRoster, PendingRedemptionsEvent, RelayPairingsEvent, RemotePairingsEvent } from "../shared/machines.ts";
 import type { AgentRowTokens } from "../shared/pane-tokens.ts";
 import type { SharedPreferences } from "../shared/preferences.ts";
 import type { SeenFinish } from "../shared/seen.ts";
@@ -18,54 +19,31 @@ const fail = (code: string, message: string, status: number) => jsonResponse({ e
  * is still queued, never afterwards, so a stream opening with one does not end at its next frame.
  */
 export const MACHINE_EVENTS_QUEUE_BYTES = 4 * 1024 * 1024;
-/**
- * What every machine events stream together may hold, every queued byte counted, large frames and
- * watching devices included. Past it, the streams that stopped reading are ended, the one holding
- * the most first: a stream whose browser has taken nothing from its queue for MACHINE_EVENTS_STALL_MS.
- * One that reads on is never that, however much it has waiting, and one that has just been sent its
- * roster has not stopped reading either, so neither is ended nor ends another.
- */
 export const MACHINE_EVENTS_TOTAL_BYTES = 32 * 1024 * 1024;
-/** How long a browser may take nothing from a waiting queue before its stream counts as stopped reading. */
 export const MACHINE_EVENTS_STALL_MS = 30_000;
-/**
- * What every stream together may hold even while none has stopped reading yet (browsers opening at
- * once with large rosters): past it a frame is refused and its stream ended, and the browser opens it
- * again. A frame its stream is alone in holding always goes, so one roster larger than this does too.
- */
 export const MACHINE_EVENTS_CEILING_BYTES = 64 * 1024 * 1024;
-/** When a browser last took from its queue is read from this; tests move it on instead of waiting. */
 export const machineEventsClock = {
   now: (): number => performance.now(),
   heartbeat: (send: () => void): ReturnType<typeof setInterval> => setInterval(send, 15_000),
 };
 
-/** Relay source queues share the channel's bounded payload budget, without the large-roster exception. */
 export interface EventStreamBudget {
   reserve(bytes: number): boolean;
   release(bytes: number): void;
 }
 
-/**
- * `told`: what the stream held when it was last written to; a queue only shrinks between writes, so it
- * is never less. `taken`: every byte its browser has taken so far; `movedAt`: when that was last seen
- * to grow, or the queue to be empty.
- */
 interface EventsQueue { queued: () => number; taken: () => number; drop: () => void; told: number; seenTaken: number; movedAt: number }
-/** Notes whether the browser has taken anything since it was last looked at: reading on, however slowly, is no stall. */
 const observe = (queue: EventsQueue, now: number): void => {
   const taken = queue.taken();
   if (taken !== queue.seenTaken || queue.queued() === 0) { queue.seenTaken = taken; queue.movedAt = now; }
 };
 const eventsQueues = new Set<EventsQueue>();
-/** The sum of every stream's `told`: never less than what all of them hold, so the total is counted exactly only near it. */
 let toldTotal = 0;
 const forgetQueue = (queue: EventsQueue): void => {
   if (!eventsQueues.delete(queue)) return;
   toldTotal -= queue.told;
   queue.told = 0;
 };
-/** Bytes waiting in every open machine events stream. */
 export const machineEventsQueuedBytes = (): number => {
   let total = 0;
   for (const queue of eventsQueues) total += queue.queued();
@@ -88,17 +66,12 @@ export const nonCanonicalPath = (pathname: string): boolean => pathname.includes
 export const MACHINE_PROXY_PATH = /^(?:session|sessions\/(?:history|resume)|agents|agent-catalog(?:\/(?:install|sign-in))?|integrations|system|usage\/statusline|pane\/(?:read|scroll|find|selection|conversation(?:\/image|\/tool-output)?|summary|commands|files|docs|omo-tasks|background-agent|plan|artifacts|btw|prompt|prompt\/answer|input|keys|close|rename|image|split|zoom|swap|move|resize|clear|focus)|workspace\/(?:create|rename|move|close|directories|diff\/files|diff\/file|diff\/refs|git\/log|git\/branches|git\/show|pr|pr\/log|pr\/merge)|worktree\/(?:create|list|inventory|open|remove)|tab\/(?:create|rename|close|move|move-to-workspace)|layout\/ratio|agent\/(?:rename|commands)|plugins\/actions|plugin\/action|fs\/(?:stat|file|favicon|text))$/;
 
 
-/**
- * A PC that could not be reached. A timed-out or aborted call is not a broken connection:
- * the PC is there and the answer did not come in time (or the client gave up first), so it
- * says so, and the cause is logged either way — the cause is the only thing that tells a
- * slow PC from an offline one.
- */
+
 export async function handleMachineRequest(request: Request, manager: MachineManager, onRevoke?: (close: () => void) => () => void,
   preferences?: { get(): SharedPreferences; subscribe(listener: (preferences: SharedPreferences) => void): () => void }, _readOnly = false,
   herdrSidebar?: { get(): AgentRowTokens | null; subscribe(listener: (agents: AgentRowTokens | null) => void): () => void },
   seen?: { list(): SeenFinish[]; subscribe(listener: (finish: SeenFinish) => void): () => void },
-  pairings?: { subscribe(listener: (event: DevicePairedEvent | DeviceRemovedEvent | RelayPairingsEvent | RemotePairingsEvent) => void): () => void },
+  pairings?: { subscribe(listener: (event: DevicePairedEvent | DeviceRemovedEvent | RelayPairingsEvent | RemotePairingsEvent | PendingRedemptionsEvent) => void): () => void },
   relayBudget?: EventStreamBudget,
   _owner = false,
   expectedOrigin?: string): Promise<Response> {
@@ -111,8 +84,13 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
     if (!parts.length && request.method === "GET") {
       setRequestRoute("/api/machines");
       const asked = url.searchParams.getAll("verify_source_boot");
-      const shown = () => withoutHiddenTokens(herdrSidebar?.get() ?? null, manager.list());
-      if (asked.length === 0) return jsonResponse({ machines: shown() } satisfies MachineRoster);
+      // as the machine events tell it, for every answer below: without the token values herdr's rows hide
+      // (withoutHiddenTokens), and without a PC's own agent_refs (wireMachine)
+      const shown = () => withoutHiddenTokens(herdrSidebar?.get() ?? null, manager.list()).map((machine) => wireMachine(machine, false));
+      if (asked.length === 0) {
+        if (url.searchParams.get("compact_agents") !== "1") return jsonResponse({ machines: shown() } satisfies MachineRoster);
+        return jsonResponse({ machines: shown().map((machine) => wireMachine(machine, true)) } satisfies { machines: WireMachine[] });
+      }
       if (asked.length > 1 || asked[0] === "") return fail("invalid_query", "verify_source_boot names one PC", 400);
       const machineId = asked[0]!;
       if (machineId !== "local") return fail("disabled_by_policy", "Remote machine management is disabled on this server", 403);
@@ -135,7 +113,6 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
       let queue: EventsQueue | undefined;
       let charged = 0;
       let accountTaken = () => {};
-      // the browser went away: what still waits for it is dropped, not kept for a reader that is gone
       const aborted = () => drop();
       const cleanup = () => {
         stop?.(); unwatchDevice?.(); clearInterval(heartbeat);
@@ -161,7 +138,6 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
             relayBudget.release(charged - remaining);
             charged = remaining;
           };
-          // frames larger than the bound, by where they end in the stream: each counts only until it has left the queue
           let written = 0;
           const large: { end: number; bytes: number }[] = [];
           const largeQueued = (): number => {
@@ -186,13 +162,9 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
             const now = machineEventsClock.now();
             retell();
             observe(own, now);
-            // the backlog this frame adds beyond the one large frame a stream may hold: all of a small frame, of a
-            // large one what the large one already waiting leaves uncovered (none when it is the first)
             const counted = bytes.byteLength > MACHINE_EVENTS_QUEUE_BYTES ? Math.min(bytes.byteLength, largeQueued()) : bytes.byteLength;
             if (own.told - largeQueued() + counted > MACHINE_EVENTS_QUEUE_BYTES) { drop(); return; }
             if (toldTotal + bytes.byteLength > MACHINE_EVENTS_TOTAL_BYTES) {
-              // perhaps over the total: count every stream exactly, then end those that stopped reading, the one
-              // holding the most first, this one too if it is that one
               toldTotal = 0;
               for (const other of eventsQueues) { other.told = other.queued(); toldTotal += other.told; observe(other, now); }
               while (toldTotal + bytes.byteLength > MACHINE_EVENTS_TOTAL_BYTES) {
@@ -202,7 +174,6 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
                 most.drop();
                 if (most === own) return;
               }
-              // still past the ceiling with no stopped reader left to end: refused, unless this stream is alone in holding any
               if (toldTotal + bytes.byteLength > MACHINE_EVENTS_CEILING_BYTES && toldTotal - own.told > 0) { drop(); return; }
             }
             try { controller.enqueue(bytes); } catch { drop(); return; }
@@ -211,7 +182,7 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
             retell();
           };
           stop = subscribeMachineEvents({ manager, preferences, herdrSidebar, seen, pairings },
-            (event) => send(`data: ${JSON.stringify(event)}\n\n`));
+            (event) => send(`data: ${JSON.stringify(wireMachineEvent(event, url.searchParams.get("compact_agents") === "1"))}\n\n`));
           if (closed) { cleanup(); return; }
           heartbeat = machineEventsClock.heartbeat(() => send(": heartbeat\n\n"));
           request.signal.addEventListener("abort", aborted, { once: true });

@@ -34,7 +34,6 @@ describe.skipIf(process.platform !== "linux")("editing a text file (#771)", () =
     method: "PUT", headers: access.originHeaders({ "content-type": "application/json", ...headers }),
     body: JSON.stringify({ pane_id: "w1:p1", path, revision, text }),
   });
-  /** a file under the pane's folder, written fresh for one test */
   const file = (relative: string, content: string | Uint8Array, mode?: number): string => {
     const path = join(folder, relative);
     mkdirSync(join(path, ".."), { recursive: true });
@@ -114,7 +113,6 @@ describe.skipIf(process.platform !== "linux")("editing a text file (#771)", () =
     expect(symbols.setxattr(cstring(tagged), cstring("user.ovis"), Buffer.from("kept"), 4, 0)).toBe(0);
     expect((await save(tagged, sha("tagged\n"), "still tagged\n")).status).toBe(200);
     expect(read(tagged, "user.ovis")).toBe(Buffer.from("kept").toString("hex"));
-    // an access list that narrows the group and names a user
     if (Bun.which("setfacl") === null) return;
     const listed = file("listed.md", "listed\n", 0o640);
     expect(Bun.spawnSync(["setfacl", "-m", "u:nobody:r--,g::---,o::---,m::r--", listed]).exitCode).toBe(0);
@@ -209,7 +207,6 @@ describe.skipIf(process.platform !== "linux")("editing a text file (#771)", () =
     expect(await error(await save(kept, sha("kept\n"), "after\n"))).toEqual([409, "stale_revision"]);
     expect(readFileSync(join(outside, "away", "kept.md"), "utf8")).toBe("kept\n");
     expect(readdirSync(join(outside, "away"))).toEqual(["kept.md"]);
-    // and a folder removed meanwhile is a conflict, not a failure
     file("gone/note.md", "gone\n");
     textSaveHooks.beforeRename = () => rmSync(join(folder, "gone"), { recursive: true, force: true });
     expect(await error(await save(join(folder, "gone", "note.md"), sha("gone\n"), "after\n"))).toEqual([409, "stale_revision"]);

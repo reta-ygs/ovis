@@ -1,8 +1,8 @@
 {
   "upstreamRepo": "devswha/ovis",
   "upstreamBranch": "main",
-  "upstreamCommit": "e2349be52c2b30f0a6c5fde12289c9586e2ff236",
-  "syncedCommit": "e2349be52c2b30f0a6c5fde12289c9586e2ff236",
+  "upstreamCommit": "860d1b5b62b933791601740a3d0e6fa7aa89e207",
+  "syncedCommit": "860d1b5b62b933791601740a3d0e6fa7aa89e207",
   "forkRepo": "git@github.com:reta-ygs/ovis.git",
   "deletedPaths": [
     ".github",

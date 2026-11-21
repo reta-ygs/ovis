@@ -68,6 +68,11 @@ export interface PushService {
   devicePaired(event: DevicePairedEvent, origin?: readonly string[]): Promise<void>;
   seed(panes: readonly HerdrPane[], machineId?: string, machineName?: string, serverId?: string): void;
   resync(panes: readonly HerdrPane[], newer: ReadonlySet<string>, machineId?: string): void;
+  assume(paneId: string, status: AgentStatus, machineId?: string): void;
+  gone(panes: readonly HerdrPane[], newer: ReadonlySet<string>, machineId?: string): void;
+  closed(paneId: string, machineId?: string): void;
+  moved(from: string, to: string, machineId?: string): void;
+  firstStatus(paneId: string, created: AgentStatus, status: AgentStatus, machineId?: string): Promise<void>;
   onStatus(paneId: string, status: AgentStatus, machineId?: string): Promise<void>;
   onEnded(paneId: string, machineId?: string): Promise<void>;
   onFailed(paneId: string, machineId?: string): Promise<void>;
@@ -183,6 +188,11 @@ export function createPushService(_options: PushServiceOptions): PushService {
     devicePaired: async () => {},
     seed: () => {},
     resync: () => {},
+    assume: () => {},
+    gone: () => {},
+    closed: () => {},
+    moved: () => {},
+    firstStatus: async () => {},
     onStatus: async () => {},
     onEnded: async () => {},
     onFailed: async () => {},

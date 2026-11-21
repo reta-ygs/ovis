@@ -32,9 +32,7 @@ describe("GET /api/agent-catalog", () => {
     mkdirSync(bin);
     const state = join(root, "state");
     mkdirSync(state);
-    // one paired device that may only watch
     writeFileSync(join(state, "devices.json"), JSON.stringify({ gate_closed_at: new Date().toISOString(), devices: [{ id: "0123456789abcdef", label: "Watch fixture", role: "watch", token_hash: createHash("sha256").update(WATCH_TOKEN).digest("hex"), created_at: new Date().toISOString(), last_seen_at: null }] }), { mode: 0o600 });
-    // installer folders are looked for in an empty home, never this PC's own
     const home = join(root, "home");
     mkdirSync(home);
     const agentDetector = new AgentDetector({ locate: catalogLocator({ probe: null }), home, env: {} });
@@ -197,14 +195,12 @@ it("serves the first agent catalog GET from the startup warm cache without anoth
 
 it("a GET during the warm-up joins its version reads: no agent's --version runs twice, queued ones included", async () => {
   const root = mkdtempSync(join(tmpdir(), "ovis-catalog-warm-join-"));
-  // more agents than run at once, so some of the warm-up's reads still wait in its queue when the GET comes
   const ids = ["claude", "codex", "copilot", "opencode", "grok", "pi"];
   const executables = new Map(ids.map((id) => [id, join(root, id)]));
   for (const path of executables.values()) writeFileSync(path, "fixture executable");
   const runs = new Map<string, number>();
   const release = Promise.withResolvers<void>();
   const first = Promise.withResolvers<void>();
-  // every agent asked twice (the warm-up, then the GET) while no read has finished
   const asked = new Map<string, number>();
   const bothAsked = Promise.withResolvers<void>();
   class Detector extends AgentDetector {
@@ -301,7 +297,6 @@ it.skipIf(process.platform === "win32")("kills held warm-up processes on stop wi
   let launches = 0;
   let versionRuns = 0;
   let exits = 0;
-  // Each real version process holds a connection; its close is the process-death signal.
   const listener = Bun.listen({
     hostname: "127.0.0.1", port: 0,
     socket: {

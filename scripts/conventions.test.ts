@@ -2,35 +2,36 @@ import { describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, sep } from "node:path";
+import { dirname, join, posix, sep } from "node:path";
 import { fixedSleepCounts, fixedSleeps, sleepFiles } from "./fixed-sleeps.ts";
 import { fail, files, lineOf, read, repo, stripComments } from "./source-scan.ts";
 
-// Repo-wide rules from AGENTS.md that used to be prose only. Each failure says what to change;
-// client rules are in src/conventions.test.ts, server rules in server/conventions.test.ts.
+const SOURCES = [...files("{src,server,shared,scripts,site,telemetry,integrations,tui}/**/*.{ts,tsx,mjs,js}"), "vite.config.ts"];
 
-const SOURCES = [...files("{src,server,shared,scripts,site,telemetry,integrations}/**/*.{ts,tsx,mjs,js}"), "vite.config.ts"];
+// A declaration never runs on into the next `import`: one that no semicolon ends would otherwise take the import
+// after it for its own `from`, and that import's specifier would go unread.
+const SPECIFIER = /(?:^|[\s;])(?:import|export)\s(?:(?!\bimport\b)[^;])*?\sfrom\s*["']([^"']+)["']|(?:^|[\s;])import\s*["']([^"']+)["']|\bimport\(\s*["']([^"']+)["']\s*\)/gm;
 
-/** Module specifiers of static imports and re-exports, side-effect imports and `import("…")` with a literal. */
-const SPECIFIER = /(?:^|[\s;])(?:import|export)\s[^;]*?\sfrom\s*["']([^"']+)["']|(?:^|[\s;])import\s*["']([^"']+)["']|\bimport\(\s*["']([^"']+)["']\s*\)/gm;
+const specifiersIn = (code: string): { specifier: string; line: number }[] =>
+  [...code.matchAll(SPECIFIER)].map((match) => {
+    const specifier = match[1] ?? match[2] ?? match[3]!;
+    return { specifier, line: lineOf(code, match.index + match[0].lastIndexOf(specifier)) };
+  });
+
+const specifiers = (file: string): { specifier: string; at: string }[] =>
+  specifiersIn(stripComments(read(file))).map(({ specifier, line }) => ({ specifier, at: `${file}:${line}: ${specifier}` }));
 
 describe("imports", () => {
   it("name relative modules with their extension and never use the @shared alias", () => {
-    const offenders = SOURCES.flatMap((file) => {
-      const code = stripComments(read(file));
-      return [...code.matchAll(SPECIFIER)].flatMap((match) => {
-        const specifier = match[1] ?? match[2] ?? match[3]!;
-        const bad = specifier.startsWith("@shared/") || (specifier.startsWith(".") && !/\.(?:ts|tsx|mjs|js|css|json|md|svg|png|woff2|html|txt)(?:\?[\w&=-]*)?$/.test(specifier));
-        return bad ? [`${file}:${lineOf(code, match.index)}: ${specifier}`] : [];
-      });
-    });
+    const offenders = SOURCES.flatMap((file) => specifiers(file)
+      .filter(({ specifier }) => specifier.startsWith("@shared/") || (specifier.startsWith(".") && !/\.(?:ts|tsx|mjs|js|css|json|md|svg|png|woff2|html|txt|wasm|sh)(?:\?[\w&=-]*)?$/.test(specifier)))
+      .map(({ at }) => at));
     fail(offenders, "Imports carry explicit .ts/.tsx extensions and relative paths (AGENTS.md, Code conventions): write \"./x.ts\" or \"../shared/x.ts\", never \"./x\" or \"@shared/x\".");
   });
 
-  it("finds the specifiers", () => {
-    const found = (code: string) => [...code.matchAll(SPECIFIER)].map((match) => match[1] ?? match[2] ?? match[3]);
-    expect(found("import { a } from \"./a.ts\";\nimport type {\n  B,\n} from '../b';\nimport \"./side.css\";\nconst c = await import(\"./c.tsx\");\nexport * from \"./d.ts\";"))
-      .toEqual(["./a.ts", "../b", "./side.css", "./c.tsx", "./d.ts"]);
+  it("finds the specifiers and the line each is on", () => {
+    expect(specifiersIn("import { a } from \"./a.ts\";\nimport type {\n  B,\n} from '../b';\nimport \"./side.css\";\nconst c = await import(\"./c.tsx\");\nexport * from \"./d.ts\";"))
+      .toEqual([{ specifier: "./a.ts", line: 1 }, { specifier: "../b", line: 4 }, { specifier: "./side.css", line: 5 }, { specifier: "./c.tsx", line: 6 }, { specifier: "./d.ts", line: 7 }]);
   });
 });
 
@@ -38,43 +39,103 @@ describe("the frontend build", () => {
   const BUILD_SCRIPTS = ["vite.config.ts", "scripts/build-xterm.ts", "scripts/compressed-assets.ts", "scripts/service-worker-build.ts", "scripts/theme-bootstrap-build.ts", "scripts/shell-build.ts", "scripts/build-cache.ts"];
 
   it("imports nothing from server/ or relay/", () => {
-    const offenders = BUILD_SCRIPTS.flatMap((file) => {
-      const code = stripComments(read(file));
-      return [...code.matchAll(SPECIFIER)].flatMap((match) => {
-        const specifier = match[1] ?? match[2] ?? match[3]!;
-        return /(?:^|\/)(?:server|relay)\//.test(specifier) ? [`${file}:${lineOf(code, match.index)}: ${specifier}`] : [];
-      });
-    });
+    const offenders = BUILD_SCRIPTS.flatMap((file) => specifiers(file).filter(({ specifier }) => /(?:^|\/)(?:server|relay)\//.test(specifier)).map(({ at }) => at));
     fail(offenders, "The frontend build scripts import nothing from server/ or relay/ (they would load the server's environment): put what both need in shared/ (shared/web-policy.ts) and import it from there.");
   });
 });
 
+describe("what the browser loads", () => {
+  // src/ and site/ are bundled for the browser, and shared/ is loaded there and by the server both.
+  // An import that leads out of them (server/, relay/, scripts/, app/ …) puts code written for Bun
+  // or Node into that bundle, where the environment it reads is not there.
+  const MAY_IMPORT: Readonly<Record<string, readonly string[]>> = { src: ["shared"], shared: [] };
+  const leadsTo = (file: string, specifier: string): string => posix.normalize(posix.join(posix.dirname(file), specifier)).replace(/\/.*$/, "");
+  const crossings = Object.keys(MAY_IMPORT).flatMap((own) =>
+    files(`${own}/**/*.{ts,tsx,mjs,js}`).filter((file) => !/\.test\./.test(file)).flatMap((file) =>
+      specifiers(file).filter(({ specifier }) => specifier.startsWith(".")).map(({ specifier, at }) => ({ own, to: leadsTo(file, specifier), at })))
+      .filter(({ to }) => to !== own));
+
+  it("imports only from its own directory and the ones it may", () => {
+    fail(crossings.filter(({ own, to }) => !MAY_IMPORT[own]?.includes(to)).map(({ at }) => at),
+      "Code the browser loads imports only from the browser's side: src/ from src/ and shared/, site/ from site/, src/ and shared/, and shared/ from shared/ alone, since the server loads it too. Move what both sides need into shared/ (as shared/web-policy.ts and shared/markdown.ts were) and import it from there; a type that describes the wire goes in shared/protocol.ts.");
+  });
+
+  it("lists no import that nothing makes any more", () => {
+    const made = new Set(crossings.map(({ own, to }) => `${own}/ from ${to}/`));
+    fail(Object.entries(MAY_IMPORT).flatMap(([own, others]) => others.map((to) => `${own}/ from ${to}/`)).filter((allowed) => !made.has(allowed)),
+      "MAY_IMPORT in scripts/conventions.test.ts allows these imports, and no code makes them any more: take them out.");
+  });
+
+  it("knows the directory an import leads to", () => {
+    expect(leadsTo("src/lib/api.ts", "../../shared/protocol.ts")).toBe("shared");
+    expect(leadsTo("src/lib/api.ts", "../../server/http.ts")).toBe("server");
+    expect(leadsTo("src/server/list.ts", "./server/row.ts")).toBe("src");
+    expect(leadsTo("site/demo/transport.ts", "../../src/lib/phone.ts")).toBe("src");
+    expect(leadsTo("shared/web-policy.ts", "../package.json")).toBe("package.json");
+  });
+});
+
+const gitIn = (cwd: string, ...args: string[]) => spawnSync("git", args, { cwd, encoding: "utf8" });
+
+function ratchetBase(env: Record<string, string | undefined> = process.env, cwd: string = repo): string | null {
+  const named = env["RATCHET_BASE"];
+  if (named) {
+    if (gitIn(cwd, "cat-file", "-e", `${named}^{commit}`).status !== 0) throw new Error(`RATCHET_BASE ${named} is not in this checkout: fetch it first, as ci.yml's Fast checks does.`);
+    return named;
+  }
+  const base = gitIn(cwd, "merge-base", "HEAD", "origin/main");
+  if (base.status === 0) return base.stdout.trim();
+  if (env["CI"]) console.log("No base for the ratchets here (no RATCHET_BASE, no origin/main): they compare with nothing.");
+  return null;
+}
+
+const renamesSince = (base: string): Map<string, string> =>
+  new Map(gitIn(repo, "diff", "--name-status", "-M", "--diff-filter=R", base).stdout.split("\n")
+    .map((line) => line.split("\t")).filter((parts) => parts.length === 3).map(([, from, to]) => [to!, from!]));
+
+const atBase = (base: string, file: string): string | null => {
+  const shown = gitIn(repo, "show", `${base}:${file}`);
+  return shown.status === 0 ? shown.stdout : null;
+};
+
+describe("the ratchets' base", () => {
+  it("is the commit CI names, fails when that commit is not in the checkout, and is else where the branch left origin/main", () => {
+    const root = mkdtempSync(join(tmpdir(), "ovis-ratchet-base-"));
+    try {
+      const git = (...args: string[]) => gitIn(root, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args);
+      git("init", "-q", "-b", "work");
+      git("commit", "-q", "--allow-empty", "-m", "base");
+      const first = git("rev-parse", "HEAD").stdout.trim();
+      expect(ratchetBase({}, root)).toBeNull();
+      git("update-ref", "refs/remotes/origin/main", first);
+      git("commit", "-q", "--allow-empty", "-m", "change");
+      expect(ratchetBase({}, root)).toBe(first);
+      expect(ratchetBase({ RATCHET_BASE: first }, root)).toBe(first);
+      expect(() => ratchetBase({ RATCHET_BASE: `${"0".repeat(39)}1` }, root)).toThrow("is not in this checkout");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("fixed sleeps", () => {
-  // A ratchet: scripts/fixed-sleeps.json is every file's count of fixed sleeps when this test was
-  // added (see scripts/fixed-sleeps.ts for what counts). A file may lose sleeps, never gain one,
-  // and a file that is not listed has none.
   const baseline = JSON.parse(read("scripts/fixed-sleeps.json")) as Record<string, number>;
 
-  /**
-   * scripts/fixed-sleeps.json where this branch left origin/main, or null when git or that ref is
-   * not there (CI's shallow checkout); a stale branch is compared with its own base, not a main
-   * that has moved on.
-   */
-  const committed = (): Record<string, number> | null => {
-    const git = (...args: string[]) => spawnSync("git", args, { cwd: repo, encoding: "utf8" });
-    const base = git("merge-base", "HEAD", "origin/main");
-    if (base.status !== 0) return null;
-    const json = git("show", `${base.stdout.trim()}:scripts/fixed-sleeps.json`);
-    return json.status === 0 ? JSON.parse(json.stdout) as Record<string, number> : null;
+  const committed = (): { counts: Record<string, number>; renames: Map<string, string> } | null => {
+    const base = ratchetBase();
+    const json = base === null ? null : atBase(base, "scripts/fixed-sleeps.json");
+    return base === null || json === null ? null : { counts: JSON.parse(json) as Record<string, number>, renames: renamesSince(base) };
   };
 
-  it("never raises scripts/fixed-sleeps.json above the one on origin/main", () => {
-    const before = committed();
-    if (before === null) return;
+  it("never raises scripts/fixed-sleeps.json above the one at the ratchets' base", () => {
+    const at = committed();
+    if (at === null) return;
+    const before = at.counts;
+    const was = (file: string): number => before[file] ?? before[at.renames.get(file) ?? ""] ?? 0;
     const total = (counts: Record<string, number>) => Object.values(counts).reduce((sum, count) => sum + count, 0);
     fail([
-      ...Object.entries(baseline).filter(([file, count]) => count > (before[file] ?? 0)).map(([file, count]) => `${file}: ${count}, origin/main has ${before[file] ?? 0}`),
-      ...total(baseline) > total(before) ? [`total: ${total(baseline)}, origin/main has ${total(before)}`] : [],
+      ...Object.entries(baseline).filter(([file, count]) => count > was(file)).map(([file, count]) => `${file}: ${count}, the base has ${was(file)}`),
+      ...total(baseline) > total(before) ? [`total: ${total(baseline)}, the base has ${total(before)}`] : [],
     ], "scripts/fixed-sleeps.json may only shrink: take the new fixed sleep out of the code instead (see the message of the test above for how). A renamed file takes its entry along with the same count, which keeps the total.");
   });
 
@@ -124,15 +185,11 @@ describe("fixed sleeps", () => {
     expect(found("const wait = io.wait ?? Bun.sleep;\nawait wait(5);")).toBe(1);
     expect(found("const tick = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));\nawait tick();\nawait tick(20);")).toBe(1);
     expect(found("const wait = io.wait ?? Bun.sleep;\nwhile (Date.now() < deadline) await wait(25);")).toBe(0);
-    // a function that starts with a sleep is not a sleep helper: it counts once, where it sleeps
     expect(found("async function flood() {\n  await Bun.sleep(150);\n  send();\n}\nawait flood();\nawait flood();")).toBe(1);
   });
 });
 
 describe("names from before Ovis", () => {
-  // Settings are OVIS_*, the sign-in cookies ovis_token and ovis_device, browser storage keys ovis:*,
-  // pasted files <cwd>/.ovis.
-  // The old names stay only where an install from before the rename still hands them in.
   const CARRY_OVER: Record<string, string> = {
     "server/legacy-env.ts": "maps each old setting to its new name",
     "server/legacy-env.test.ts": "tests that mapping",
@@ -177,24 +234,17 @@ describe("raw NUL bytes", () => {
   // a text file with a NUL in it is exactly what git starts calling binary.
   const BINARY_SUFFIXES = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".icns", ".woff", ".woff2", ".ttf", ".otf", ".webm", ".mp4", ".mov", ".mp3", ".wav", ".pdf", ".zip", ".gz", ".tgz", ".jar", ".wasm", ".dmg"]);
 
-  /** Whether a repository-relative path is text: any name without a binary suffix. */
   const isText = (path: string): boolean => {
     const name = path.split("/").at(-1)!;
     const dot = name.lastIndexOf(".");
     return dot < 0 || !BINARY_SUFFIXES.has(name.slice(dot).toLowerCase());
   };
 
-  /** The offender line for a file's bytes: its JSON-escaped path and the zero-based byte offset of the first raw NUL, or null. */
   const nulAt = (path: string, bytes: Uint8Array): string | null => {
     const at = bytes.indexOf(0);
     return at < 0 ? null : `${JSON.stringify(path)}: raw NUL at byte ${at}`;
   };
 
-  /**
-   * Tracked text files of the checkout at `root` holding a raw NUL, and how many were read. A
-   * failed `git ls-files` or an unreadable file is an offender, never an empty scan; a tracked
-   * file deleted from the checkout is skipped, and a symlink is not followed.
-   */
   const scanNul = (root: string, env: Record<string, string | undefined> = process.env): { scanned: number; offenders: string[] } => {
     const listed = spawnSync("git", ["ls-files", "-z", "--cached"], { cwd: root, env, maxBuffer: 256 * 1024 * 1024 });
     if (listed.error || listed.status !== 0) {
@@ -263,7 +313,6 @@ describe("raw NUL bytes", () => {
 
   it("tracked text reports first raw NUL byte offset", () => {
     expect(nulAt("a.ts", Buffer.from("\0a\0"))).toBe("\"a.ts\": raw NUL at byte 0");
-    // "é" and "한" are 2 and 3 bytes, so the NUL is at byte 18 though it is character 15
     expect(nulAt("src/new\nline.ts", Buffer.from("const s = \"é한\";\0\0"))).toBe("\"src/new\\nline.ts\": raw NUL at byte 18");
     expect(nulAt("a.ts", Buffer.from("clean"))).toBeNull();
     // Windows forbids a newline in a file name
@@ -273,7 +322,6 @@ describe("raw NUL bytes", () => {
   });
 
   it("reads tracked text in any directory and with any name", () => {
-    // the two misses the allowlist had: a lock file it did not list, and a new top-level directory
     withRepo({ "crates/pty-sidecar/Cargo.lock": "version = 4\n\0", "tools/new.ts": "export {};\0", "Brewfile": "\0" }, {}, (root, env) => {
       expect(scanNul(root, env)).toEqual({ scanned: 3, offenders: ["\"Brewfile\": raw NUL at byte 0", "\"crates/pty-sidecar/Cargo.lock\": raw NUL at byte 12", "\"tools/new.ts\": raw NUL at byte 10"] });
     });

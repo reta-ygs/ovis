@@ -100,6 +100,11 @@ export interface TelemetryChange {
   notice_seen?: true;
   notice_version?: number;
   settings?: TelemetrySettings;
+  /**
+   * with `settings`: the counting generation (TelemetryStatus.counts_generation) the page last heard. Settings told
+   * from before an off it did not hear are not kept
+   */
+  generation?: number;
   /** a pane alert was tapped (public/sw.js): counted in today's `alerts_opened`, and nothing else */
   alert_opened?: true;
   /** what a browser used since it last told: added to today's counts (TelemetryCounts). A server before it answers 400 */
@@ -236,10 +241,12 @@ export const TELEMETRY_SURFACES = ["android-app", "browser", "ios-app", "mac-app
 export type TelemetrySurface = typeof TELEMETRY_SURFACES[number];
 
 /**
- * How a visit reached this server: server/access.ts `observedIngress`, with an unforwarded request
- * split into one from this PC itself (`local`) and one from another device (`lan`).
+ * How a visit reached this server: the observed ingress /api/health reports (server/dispatch.ts
+ * `requestIngress`), with the Ovis relay and Portal, and an unforwarded request split into one from
+ * this PC itself (`local`) and one from another device (`lan`). Only the word, never an address,
+ * Portal name or relay id.
  */
-export const TELEMETRY_INGRESS = ["funnel", "lan", "local", "proxy", "tailscale", "unknown"] as const;
+export const TELEMETRY_INGRESS = ["funnel", "lan", "local", "portal", "proxy", "relay", "tailscale", "unknown"] as const;
 export type TelemetryIngress = typeof TELEMETRY_INGRESS[number];
 
 /** The most a usage count says: a busier day is reported as this many. */
@@ -423,6 +430,13 @@ export interface TelemetryCountsChange {
   width: TelemetryWidth;
   add: Partial<Record<TelemetryCounter, number>>;
   shown: TelemetryShown[];
+  /**
+   * the counting generation (TelemetryStatus.counts_generation) the page last heard: every off begins a new one,
+   * and a batch from an older one (another tab's, from before an off) is dropped
+   */
+  generation?: number;
+  /** the UTC day the batch was counted on (YYYY-MM-DD): a batch sent just after midnight still counts for the day before */
+  day?: string;
 }
 
 const isCounter = (name: string): name is TelemetryCounter => (TELEMETRY_COUNTERS as readonly string[]).includes(name);
@@ -467,7 +481,13 @@ export function telemetryWidthCounts(value: unknown): TelemetryWidthCounts | nul
  */
 export function telemetryCountsChange(value: unknown): TelemetryCountsChange | null {
   const record = plainRecord(value);
-  if (!record || Object.keys(record).length !== 3) return null;
+  const keys = record ? Object.keys(record) : [];
+  const optional = ["generation", "day"];
+  if (!record || keys.filter((key) => !optional.includes(key)).length !== 3) return null;
+  const generation = record["generation"];
+  if (generation !== undefined && !integerBetween(0, Number.MAX_SAFE_INTEGER)(generation)) return null;
+  const day = record["day"];
+  if (day !== undefined && (typeof day !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(day))) return null;
   const width = record["width"];
   const add = plainRecord(record["add"]);
   const shown = shownNames(record["shown"]);
@@ -478,7 +498,7 @@ export function telemetryCountsChange(value: unknown): TelemetryCountsChange | n
     if (!count(value)) return null;
     if (isCounter(name)) clean[name] = value as number;
   }
-  return { width, add: clean, shown };
+  return { width, add: clean, shown, ...(generation === undefined ? {} : { generation: generation as number }), ...(day === undefined ? {} : { day: day as string }) };
 }
 
 /**
@@ -516,4 +536,6 @@ export interface TelemetryStatus {
   active: TelemetryActive;
   /** today's counts so far as they would be sent once the day has ended; absent from a server before counts */
   counts?: TelemetryCounts;
+  /** the counting generation a browser's batches name (TelemetryCountsChange.generation); absent where counts are off */
+  counts_generation?: number;
 }

@@ -274,7 +274,6 @@ it("reads usage after a Settings change only with Plan limits on, and only once 
   expect((await share({ usageHidden: ["copilot:a"] })).status).toBe(200);
   expect((await share({ usageHidden: [] })).status).toBe(200);
   expect(searches).toBe(0);
-  // Plan limits on: hiding one reads nothing, showing it again reads at once
   expect((await share({ showUsage: true })).status).toBe(200);
   expect((await fetch(`${origin}/api/usage`, { headers: access.headers() })).status).toBe(200);
   expect(searches).toBe(1);

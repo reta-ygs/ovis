@@ -64,7 +64,7 @@ let
 
     outputHashMode = "recursive";
     outputHashAlgo = "sha256";
-    outputHash = "sha256-U3GAqBykEqCLDkB9bAG7qZrZdRLYAdpM6pZsEvjRw00=";
+    outputHash = "sha256-8sC+ZGVKFa55RK4L9RM2/7WAseHhd3JCPLGuoImrC9o=";
   };
 in
 assert lib.versionAtLeast bun.version (

@@ -121,7 +121,6 @@ describe("file routes", () => {
     } finally {
       setFilePoolOptions();
     }
-    // found and described, then held while it is opened and read: the headers wait no longer than the deadline
     const heldOpen = join(folder, "held-open");
     writeFileSync(heldOpen, "small");
     setFilePoolOptions({ worker: new URL("./file-worker.fake.ts", import.meta.url), workers: 2, waiting: 0, deadlineMs: 500 });
@@ -142,7 +141,6 @@ describe("file routes", () => {
     const whole = await ask(`/api/fs/file?path=${q(big)}`);
     expect(whole.status).toBe(200);
     expect(whole.headers.get("accept-ranges")).toBe("bytes");
-    // larger than one read, from a disk that answers at once: sent with its length, as a download shows it
     expect(whole.headers.get("content-length")).toBe(String(bytes.length));
     const large = await ask(`/api/fs/file?path=${q(big)}`, { headers: { range: "bytes=1000-299999" } });
     expect(large.status).toBe(206);
@@ -153,7 +151,6 @@ describe("file routes", () => {
     const part = await ask(`/api/fs/file?path=${q(big)}`, { headers: { range: "bytes=100-109" } });
     expect(part.status).toBe(206);
     expect(part.headers.get("content-range")).toBe(`bytes 100-109/${bytes.length}`);
-    // a body that fits in one read keeps its length; a longer one streams without it
     expect(part.headers.get("content-length")).toBe("10");
     const small = join(folder, "small.bin");
     writeFileSync(small, bytes.subarray(0, 1000));

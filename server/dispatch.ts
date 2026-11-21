@@ -1,3 +1,4 @@
+import { machineFailure, machineLayoutReason } from "./machine-profile.ts";
 import { handleWorkspaceRequest } from "./workspace-routes.ts";
 import { connectionData, type createCore, type SocketData } from "./core/index.ts";
 import type { ClientConnectionLog } from "./client-connection-log.ts";
@@ -11,7 +12,7 @@ import { scheduleCfAccessExpiry, type CfAccessVerifier } from "./cf-access.ts";
 import type { DeviceMatch, DeviceStore } from "./devices.ts";
 import { handlePreferencesRequest, type PreferenceStore } from "./preferences.ts";
 import { handleSeenRequest, type SeenStore } from "./seen.ts";
-import { badRequest, errorResponse, jsonResponse, setRequestRoute } from "./http.ts";
+import { badRequest, errorResponse, jsonResponse, setRequestRoute, wordedHeaders, wordHerdrFailures } from "./http.ts";
 import { serveStatic } from "./static.ts";
 import { compressResponse } from "./compress.ts";
 import { handleTasksRequest } from "./tasks-routes.ts";
@@ -38,8 +39,17 @@ import { attachableIdentity } from "./pty/sidecar.ts";
 import { runtime } from "./herdr-core/runtime.ts";
 import { handleUpdateRequest } from "./update-api.ts";
 import { handleHerdrUpdateRequest } from "./herdr-update.ts";
+import type { LocalConfirms } from "./account/local-confirm.ts";
+import type { RecoveryReleases } from "./account/recovery.ts";
+import type { PendingRedemption, PendingRedemptions } from "./account/pending.ts";
+import type { KeyProofPairings } from "./account/key-proof.ts";
+import type { lockRoutes } from "./account/lock-routes.ts";
+import type { LockSignal } from "./lock-boundary.ts";
 import type { AccountMailbox } from "./account/mailbox.ts";
 import type { AccountHolds } from "./account/holds.ts";
+import type { SafetyLog } from "./account/safety-log.ts";
+import type { CatchUpGate } from "./account/catch-up-gate.ts";
+import type { accountRowsFor } from "./account/account-devices.ts";
 import type { AccountIntroductions } from "./account/introductions.ts";
 import type { RelayService } from "./relay/service.ts";
 import { handleTelemetryRequest } from "./telemetry.ts";
@@ -67,9 +77,7 @@ import type { VoiceService } from "./voice.ts";
 
 type PortalStartup = { ok: true } | { ok: false; error: unknown };
 
-/** Per-server services shared by socket requests and other dispatch callers. */
 export interface RequestServices {
-  /** the move of herdr's session to herdr-core, where the runtime can be switched from here */
   readonly runtimeMove: MoveService | null;
   readonly relay: RelayService;
   readonly relayReceiptIds: RelayReceiptIds;
@@ -82,6 +90,13 @@ export interface RequestServices {
   readonly accountMailbox: AccountMailbox;
   readonly accountIntroductions: AccountIntroductions;
   readonly accountHolds: AccountHolds;
+  /** the account safety log; null while OVIS_ACCOUNT_OPENS_ALL is off */
+  readonly safetyLog: SafetyLog | null;
+  /** Step 2 (S2-27): the wait after a start for rows not paired at this PC; null with the release flag off. */
+  readonly catchUp: CatchUpGate | null;
+  checkAccountFreshness(): void;
+  /** Step 2 (S2-25): the account-joined rows of this PC's relay identity; null with the release flag off. */
+  readonly accountRows: ReturnType<typeof accountRowsFor> | null;
   readonly preferences: PreferenceStore;
   readonly herdrSidebar: HerdrSidebarConfig;
   /** `loginPath`: the request states a Tailscale login, so the PC's own login must be known, not merely cached as unknown */
@@ -108,12 +123,25 @@ export interface RequestServices {
   readonly orderSequence: OrderSequence;
   readonly clientConnectionLog: ClientConnectionLog;
   readonly requestLog: RequestLog;
+  /** acts waiting for this PC's screen (server/account/local-confirm.ts); only with the Step 2 release flag */
+  readonly localConfirms?: LocalConfirms;
+  /** releases `ovis recover` made since this start (server/account/recovery.ts); only with the release flag */
+  readonly recoveryReleases?: RecoveryReleases;
+  /** devices waiting for this PC's screen to approve their key (server/account/pending.ts); only with the release flag */
+  readonly pendingRedemptions?: PendingRedemptions;
+  /** pairings that prove their key and wait for this PC's screen (server/account/key-proof.ts); Linux with the flag only */
+  readonly keyProofPairings?: KeyProofPairings;
+  /** puts a waiting key on this PC's screen */
+  readonly askScreenForKey?: (entry: PendingRedemption) => void;
+  /** /api/account/lock and /unlock (server/account/lock-routes.ts); only with the release flag */
+  readonly lockRoutes?: ReturnType<typeof lockRoutes>;
+  /** fired when the screen's approval writes a lock: what it no longer lets in ends (T46) */
+  readonly lockSignal?: LockSignal;
   readonly portalStartupResult: PortalStartup | undefined;
   readonly portalStartup: Promise<PortalStartup>;
   readonly cfAccess: { readonly verifier: CfAccessVerifier; readonly publicOrigin: string };
 }
 
-/** The transport operations a request needs; peer kinds are extended with relay authentication. */
 export interface ServerContext {
   requestIP(request: Request): { address: string } | null;
   timeout(request: Request, seconds: number): void;
@@ -123,6 +151,11 @@ export interface ServerContext {
   readonly peer: { kind: "socket" } | { kind: "relay"; device: DeviceMatch; sessionId: string; serverId: string; key: string };
   readonly services: RequestServices;
   readonly relayBodyBudget?: EventStreamBudget;
+  /**
+   * The request came in on the machine profile's owner socket (`<state folder>/serve.sock`): set by the
+   * server for that listener alone, never read from the request. Only there is a local owner of the profile.
+   */
+  readonly ownerSocket?: boolean;
   /**
    * The request came to the opt-in LAN HTTPS listener (server/lan-https.ts), from a private IPv4 peer:
    * it gets in only with the token or a paired device, never as an open install, by the bridge token,
@@ -162,8 +195,9 @@ const OTHER_MACHINE_FILES = /^\/api\/(?:fs\/|pane\/(?:files|docs|image)$|workspa
 
 export async function handleRequest(request: Request, ctx: ServerContext): Promise<Response | undefined> {
   const { options, hostname, bootId, preferences, herdrSidebar, shellAgents, agentDetector, agentOffered, agentInstaller, openCodeState, cliProxyRoutes, usageLogin, usage, voice, browserSnapshot, core, seen, piReader, orderSequence, requestLog, portalStartupResult, portalStartup, cfAccess } = ctx.services;
-  const { sidecar, serialize, push, omo, claudeAgents, opencodeAgents, plans, clientSnapshot, machines, broadcastAll, collector, queueFirstMessage } = core;
+  const { sidecar, serialize, push, omo, claudeAgents, opencodeAgents, plans, clientSnapshot, machines, broadcastAll, collector, queueFirstMessage, askFirstMessage } = core;
   return requestLog.handle(request, async (headers) => {
+  if (options.profile === "machine") wordHerdrFailures(machineFailure, machineLayoutReason);
   const startup = portalStartupResult ?? await portalStartup;
   if (!startup.ok) {
     setRequestRoute("startup");
@@ -353,7 +387,7 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
     setRequestRoute(pathname);
     try {
       const snapshot = await clientSnapshot();
-      return jsonResponse({ snapshot: browserSnapshot(snapshot) });
+      return jsonResponse({ snapshot: browserSnapshot(snapshot) }, 200, wordedHeaders());
     } catch (error) {
       return errorResponse(error);
     }
@@ -373,7 +407,7 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
   const filesResponse = await handleFileRequest(request, url, pathname, { bridgeAuthorized, requestHost, forwarded, client, access });
   if (filesResponse) return filesResponse;
 
-  const workspaceResponse = await handleWorkspaceRequest(request, url, pathname, ctx, broadcastAll, queueFirstMessage, () => {
+  const workspaceResponse = await handleWorkspaceRequest(request, url, pathname, ctx, broadcastAll, { ask: askFirstMessage, queue: queueFirstMessage }, () => {
     const receipt = orderSequence.moved();
     void machines?.refreshLocal();
     return receipt;
