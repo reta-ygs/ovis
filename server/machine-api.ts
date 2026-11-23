@@ -1,6 +1,6 @@
 import { subscribeMachineEvents } from "./machine-events.ts";
 import { wireMachine, wireMachineEvent, type WireMachine } from "../shared/compact-agents.ts";
-import type { DevicePairedEvent, DeviceRemovedEvent, MachineRoster, PendingRedemptionsEvent, RelayPairingsEvent, RemotePairingsEvent } from "../shared/machines.ts";
+import { LOCAL_MACHINE, type DevicePairedEvent, type DeviceRemovedEvent, type MachineRoster, type PendingRedemptionsEvent, type RelayPairingsEvent, type RemotePairingsEvent } from "../shared/machines.ts";
 import type { AgentRowTokens } from "../shared/pane-tokens.ts";
 import type { SharedPreferences } from "../shared/preferences.ts";
 import type { SeenFinish } from "../shared/seen.ts";
@@ -74,7 +74,7 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
   pairings?: { subscribe(listener: (event: DevicePairedEvent | DeviceRemovedEvent | RelayPairingsEvent | RemotePairingsEvent | PendingRedemptionsEvent) => void): () => void },
   relayBudget?: EventStreamBudget,
   _owner = false,
-  expectedOrigin?: string): Promise<Response> {
+  expectedOrigin?: string, accountRow = false): Promise<Response> {
   const url = new URL(request.url);
   if (!sameOrigin(request, expectedOrigin)) return fail("invalid_origin", "Use PC controls from this app", 403);
   if (!["GET", "HEAD"].includes(request.method) && request.headers.get("x-herdr-machine") !== "1") return fail("invalid_machine_request", "Use PC controls from this app", 403);
@@ -86,11 +86,13 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
       const asked = url.searchParams.getAll("verify_source_boot");
       // as the machine events tell it, for every answer below: without the token values herdr's rows hide
       // (withoutHiddenTokens), and without a PC's own agent_refs (wireMachine)
-      const shown = () => withoutHiddenTokens(herdrSidebar?.get() ?? null, manager.list()).map((machine) => wireMachine(machine, false));
+      const shown = () => withoutHiddenTokens(herdrSidebar?.get() ?? null, accountRow ? manager.list().filter((machine) => machine.id === LOCAL_MACHINE) : manager.list())
+        .map((machine) => wireMachine(machine, false));
       if (asked.length === 0) {
         if (url.searchParams.get("compact_agents") !== "1") return jsonResponse({ machines: shown() } satisfies MachineRoster);
         return jsonResponse({ machines: shown().map((machine) => wireMachine(machine, true)) } satisfies { machines: WireMachine[] });
       }
+      if (accountRow) return fail("local_only", "An account-joined device cannot do this from afar", 403);
       if (asked.length > 1 || asked[0] === "") return fail("invalid_query", "verify_source_boot names one PC", 400);
       const machineId = asked[0]!;
       if (machineId !== "local") return fail("disabled_by_policy", "Remote machine management is disabled on this server", 403);

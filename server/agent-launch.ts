@@ -7,6 +7,7 @@ import { isShellAgentKind, startShellAgent, type ShellAgentLocator } from "./she
 import { agentStart, HerdrError, sessionSnapshot } from "./herdr/client.ts";
 import { requestFault } from "./http.ts";
 import { agentStartArgs } from "./claude-settings-file.ts";
+import type { ApprovalHub } from "./approvals/hub.ts";
 import { DSH_EFFORTS, launchArgsFault } from "../shared/launch-rules.ts";
 import { browserToolArgs, browserToolChoices, browserToolConfig, isBrowserToolAgent, withBrowserToolArgs } from "../shared/browser-tools.ts";
 import { hcMachine } from "./herdr-core/runtime.ts";
@@ -80,6 +81,16 @@ async function startDshTui(paneId: string, args: string[], options: { locator?: 
   }
 }
 
+let approvals: { hub: ApprovalHub; version: (kind: string) => Promise<string | null> } | null = null;
+
+/**
+ * What an agent this server starts asks its approvals through (server/approvals/hub.ts), and how its installed version
+ * is read, which decides whether it gets the hook.
+ */
+export function useApprovalHub(hub: ApprovalHub | null, version: (kind: string) => Promise<string | null> = async () => null): void {
+  approvals = hub === null ? null : { hub, version };
+}
+
 let browserTools: { read: () => unknown; dir: string } | null = null;
 
 /** Where the launch reads the shared `agentBrowserTools` setting from, and the folder its MCP config files go in. */
@@ -123,10 +134,13 @@ export function withBrowserTool(kind: string, args: string[] | undefined, platfo
 export async function agentLaunch(paneId: string, agent: AgentPayload, launched?: (pid: number) => void, locator?: ShellAgentLocator, options: { platform?: string; settingsDir?: string; home?: string } = {}): Promise<{ agent_started: true } | { agent_started: false; error: { code: string; message: string } }> {
   try {
     const kind = agent.kind as string;
-    const args = agent.args as string[] | undefined;
-    if (isShellAgentKind(kind)) {
-      // another machine of the core: its path would be this PC's, and its start is never seen there (no pids)
-      if (hcMachine() !== null) return { agent_started: false, error: { code: "other_machine", message: `${kind} starts only on the PC that runs Ovis` } };
+    const shell = isShellAgentKind(kind);
+    // another machine of the core: its path would be this PC's, and its start is never seen there (no pids)
+    if (shell && hcMachine() !== null) return { agent_started: false, error: { code: "other_machine", message: `${kind} starts only on the PC that runs Ovis` } };
+    // an agent another machine of the core starts could not reach this PC's hub
+    const args = approvals !== null && approvals.hub.handles(kind) && hcMachine() === null
+      ? approvals.hub.launchArgs(kind, paneId, agent.args as string[] | undefined, await approvals.version(kind)) : agent.args as string[] | undefined;
+    if (shell) {
       const shellOptions = locator ? { locator } : {};
       const pid = kind === "dsh-tui" && args !== undefined
         ? await startDshTui(paneId, args, shellOptions, options.home ?? userHome())

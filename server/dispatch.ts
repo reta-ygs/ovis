@@ -35,6 +35,8 @@ import { RUNTIME_MOVE_ROUTE } from "./runtime-move.ts";
 import type { MoveService } from "./runtime-move-service.ts";
 import { handlePushRequest } from "./push.ts";
 import { handlePromptRequest, type OpenCodePromptState } from "./prompt.ts";
+import type { ApprovalHub } from "./approvals/hub.ts";
+import type { JoinNotices } from "./join-notices.ts";
 import { attachableIdentity } from "./pty/sidecar.ts";
 import { runtime } from "./herdr-core/runtime.ts";
 import { handleUpdateRequest } from "./update-api.ts";
@@ -87,6 +89,7 @@ export interface RequestServices {
   readonly bridgeToken: string;
   readonly bootId: string;
   readonly devices: DeviceStore;
+  readonly joins: JoinNotices;
   readonly accountMailbox: AccountMailbox;
   readonly accountIntroductions: AccountIntroductions;
   readonly accountHolds: AccountHolds;
@@ -108,6 +111,7 @@ export interface RequestServices {
   readonly agentOffered: (kind: string) => Promise<boolean>;
   readonly agentInstaller: AgentInstaller;
   readonly openCodeState: OpenCodePromptState;
+  readonly approvals: ApprovalHub;
   readonly cliProxyRoutes: CLIProxyRoutes;
   readonly usageLogin: UsageLoginService;
   readonly usage: UsageService;
@@ -170,6 +174,7 @@ function matchesPrefix(path: string, prefix: string): boolean {
 
 function disabledPolicyResponse(method: string, path: string): Response | null {
   const blocked = matchesPrefix(path, "/api/auth")
+    || matchesPrefix(path, "/api/access/tailscale")
     || matchesPrefix(path, "/api/devices")
     || matchesPrefix(path, "/api/portal")
     || matchesPrefix(path, "/api/relay")
@@ -453,7 +458,7 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
 
   if (pathname.startsWith("/api/pane/prompt")) {
     try {
-      const response = await handlePromptRequest(request, url, { serialize, codexHome: options.codexHome, claudeTranscript: (paneId) => claudeAgents.sessionOf(paneId)?.path ?? null, readOnly, openCodeStateDir: options.openCodeStateDir, openCodeState, onAnswered: () => options.telemetry?.tally("prompt_answers") });
+      const response = await handlePromptRequest(request, url, { serialize, codexHome: options.codexHome, claudeTranscript: (paneId) => claudeAgents.sessionOf(paneId)?.path ?? null, readOnly, openCodeStateDir: options.openCodeStateDir, openCodeState, approvals: ctx.services.approvals, onAnswered: () => options.telemetry?.tally("prompt_answers") });
       if (response) return response;
     } catch (error) {
       return errorResponse(error);

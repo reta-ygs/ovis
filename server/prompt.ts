@@ -18,7 +18,8 @@ import { ompCallPrompt, ompMarkdownPrompt, ompOpenCall, ompStepPrompt } from "./
 import { answerPiAskUser, bindPiAsk, piAskActivity, piAskUserPrompt } from "./pi-ask-bridge.ts";
 import { badRequest, errorResponse, jsonResponse, setRequestRoute } from "./http.ts";
 import { claudePlanFile } from "./claude-plan.ts";
-import { listPendingQuestionForms, openCodeService, replyOpenCodeForm } from "./opencode-service.ts";
+import { heldBody, type ApprovalDialog, type ApprovalHub } from "./approvals/hub.ts";
+import { listPendingPermissions, listPendingQuestionForms, openCodePermissionsRead, openCodeService, replyOpenCodeForm, replyOpenCodePermission, withShellInput } from "./opencode-service.ts";
 import { opencodeSessionId } from "./opencode.ts";
 import { agentPickerWaits, registry, SCREEN_READ_AGENTS } from "./dialogs/registry.ts";
 import { ANSI_RE, type AnswerStep, KEY, type OmoAsk, type ParsedPrompt, type PromptDraft, cleanLine, findLastIndex, finishPrompt, isDivider, keySteps, navigationKeys, own, parsedByPublicPrompt, publicPrompt } from "./dialogs/shared.ts";
@@ -29,7 +30,7 @@ import { agyCustomEditorMatches, agySameQuestion, parseAgyQuestion } from "./dia
 import { dshFreeTextRow, dshTypedText } from "./dialogs/dsh.ts";
 import { sameText } from "./dialogs/omo.ts";
 import { OMP_REVIEW_HINT_RE, OMP_TABS_HINT_RE, ompCustomEditorMatches } from "./dialogs/omp.ts";
-import { openCodeV1CustomEditorMatches } from "./dialogs/opencode.ts";
+import { openCodePermissionPrompt, openCodeV1CustomEditorMatches } from "./dialogs/opencode.ts";
 import { INVISIBLE_CHAR_RE } from "./dialogs/claude.ts";
 import { parsePiDialog } from "./dialogs/pi.ts";
 import { pendingPiQuestionnaires } from "./pi-questionnaire.ts";
@@ -619,6 +620,16 @@ const FORM_SETTLE_MS = 3_000;
 
 const defaultOpenCodeState = new OpenCodePromptState();
 
+/** Whether herdr reports the pane running OpenCode on this session now: a card's binding, read again after an awaited lookup. */
+async function openCodePaneOn(paneId: string, sessionID: string, openCodeState: OpenCodePromptState, deadlineAt: number): Promise<boolean> {
+  const before = openCodeState.checkpoint();
+  const snapshot = await openCodeState.snapshot(Math.max(1, deadlineAt - Date.now())).catch(() => null);
+  if (!snapshot) return false;
+  openCodeState.reconcile(snapshot.panes, before);
+  const live = snapshot.panes.find((candidate) => candidate.pane_id === paneId);
+  return !!live && live.agent === "opencode" && opencodeSessionId(live) === sessionID;
+}
+
 /** Each pane's rollout, resolved for its collapsed queue: a poll every 2s would otherwise redo it. */
 const queueRollouts = new Map<string, { path: string | null; at: number }>();
 const QUEUE_ROLLOUT_MS = 15_000;
@@ -903,20 +914,28 @@ async function readKnownPrompt(
   ompBindings = ompLookups,
 ): Promise<{ prompt: InteractivePrompt | null; screen?: string; stale?: boolean; inputUnverified?: true; suppressFallback?: true;
   settled?: InteractivePrompt }> {
-  // no native card (no session herdr reports, no verified v2 service, no pending form): OpenCode
-  // v1's own question prompt is read off the screen below (dialogs/opencode.ts, #1386)
+  // no native card (no session herdr reports, no verified v2 service, no pending permission or form): OpenCode
+  // v1's own question prompt is read off the screen below (dialogs/opencode.ts, #1386), and the fallback card stands
+  // for what no reader knows
   native: if (agent === "opencode") {
     const sessionID = opencodeSessionId(pane);
     if (!sessionID) break native;
     const state = openCodeState.begin(paneId, sessionID);
     // only the process service.json names, as /api/info proves it; never a service started here
-    const config = (await openCodeService(openCodeStateDir, signal, { onWindows: true }))?.config ?? null;
+    const service = await openCodeService(openCodeStateDir, signal, { onWindows: true });
+    const config = service?.config ?? null;
     const revision = state.revision;
     const issued = ++state.issued;
-    const forms = config ? await listPendingQuestionForms(config, sessionID, signal) : null;
+    const [forms, permissions] = config ? await Promise.all([
+      listPendingQuestionForms(config, sessionID, signal),
+      openCodePermissionsRead(service!.version)
+        ? listPendingPermissions(config, sessionID, signal).then((listed) => withShellInput(config, listed, state.permissions, signal))
+        : null,
+    ]) : [null, null];
     if (signal?.aborted || openCodeState.entries.get(paneId) !== state) return { prompt: null, stale: true };
     if (state.revision === revision && issued >= state.applied) {
       state.applied = issued;
+      state.permissions = permissions;
       state.available = forms !== null;
       if (forms !== null) {
         state.listed = forms[0] ?? null;
@@ -926,6 +945,14 @@ async function readKnownPrompt(
           state.revision++;
         }
       }
+    }
+    // a pending permission is the card before a form, as the latest read listed it; one a card cannot show whole is
+    // left to the fallback card
+    const permission = state.permissions?.[0];
+    if (permission) {
+      const card = openCodePermissionPrompt(permission);
+      if (!card) break native;
+      return { prompt: publicPrompt(card) };
     }
     const form = state.listed;
     if (!form || form.fields.length === 0) break native;
@@ -1315,8 +1342,33 @@ export interface PromptRequestOptions {
   openCodeStateDir?: string;
   openCodeState?: OpenCodePromptState;
   onAnswered?: () => void;
+  /** the approvals an agent this server started holds through its hook */
+  approvals?: ApprovalHub;
   answerDeadlineMs?: number;
   beforeKey?: (paneId: string, agent: string, deadline: AbortSignal) => Promise<void>;
+}
+
+/** The Claude Bash approval on the screen, which keeps a held hook request open: null for any other dialog. */
+const approvalDialog = (prompt: InteractivePrompt | null): ApprovalDialog | null => {
+  const parsed = prompt === null ? undefined : parsedByPublicPrompt.get(prompt);
+  return parsed?.responder === "claude-approval" && parsed.claudeBashCommand !== undefined ? { command: parsed.claudeBashCommand } : null;
+};
+
+/**
+ * A Claude command approval built from its held hook request: Claude's words and the whole command, where the screen may
+ * have cut, wrapped or mixed them. Its id names that request, so that its Yes or No answers that request and no other
+ * (heldRequestOf). The read is also what tells the hooks the screen no longer shows a request, which releases it.
+ */
+function withHeldPermission(paneId: string, agent: string, prompt: InteractivePrompt | null, approvals: ApprovalHub | undefined): InteractivePrompt | null {
+  if (approvals === undefined || !approvals.handles(agent)) return prompt;
+  const held = approvals.shown(paneId, approvalDialog(prompt));
+  return held === null || prompt === null ? prompt : { ...prompt, id: `${prompt.id}.${held.id}`, body: heldBody(held) };
+}
+
+/** The held request an answer's card was built on (withHeldPermission), or null for a card built on the screen alone. */
+function heldRequestOf(prompt: InteractivePrompt, promptId: string, agent: string, approvals: ApprovalHub | undefined): string | null {
+  return approvals !== undefined && approvals.handles(agent) && approvalDialog(prompt) !== null && promptId.startsWith(`${prompt.id}.`)
+    ? promptId.slice(prompt.id.length + 1) : null;
 }
 
 /**
@@ -1370,7 +1422,7 @@ const WAITING_RESPONDERS: ReadonlySet<string> = new Set([
   "claude-approval", "claude-confirm", "claude-plan", "claude-question", "claude-submit", "cmd-question",
   "codex-approval", "codex-question", "codex-async-question", "codex-queued-question", "codex-menu",
   "agy-question", "hermes-approval", "hermes-question", "hermes-input", "omo-question", "omo-review", "omo-pending",
-  "omp-approval", "omp-question", "omp-submit", "opencode-v1-question", "opencode-question",
+  "omp-approval", "omp-question", "omp-submit", "opencode-v1-question", "opencode-question", "opencode-permission",
 ]);
 
 /** What the waiting a card stands for is about, in the words an agent's own report uses (`kind`); null: it does not say. */
@@ -1464,7 +1516,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
         : await paneScrollInfo(paneId, undefined, SUGGESTION_READ_MS).then((scroll) => (scroll?.offset_from_bottom ?? 0) > 0 ? null : found, () => null);
       const outcomes = await commandOutcomes(paneId, read.pane, read.prompt, read.screen, readSendId, options.codexHome, read.snapshot);
       return jsonResponse({
-        prompt,
+        prompt: withHeldPermission(paneId, agent, prompt, options.approvals),
         suggestion,
         restored: box === null || agent !== "claude" ? null : await restoredOnLiveScreen(paneId, box).catch(() => null),
         ...(outcomes.length ? { outcomes: watching ? outcomes.map(({ preview: _preview, result_text: _resultText, ...outcome }) => outcome) : outcomes } : {}),
@@ -1499,8 +1551,12 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
       const firstRead = await Promise.race([first, Bun.sleep(Math.max(0, deadlineAt - Date.now())).then(() => null)]);
       if (!firstRead || Date.now() > deadlineAt) return promptChanged();
       const { prompt, agent, pane, panes, inputUnverified } = firstRead;
-      // a plan card's id carries its plan file's revision: the file as it is now must match too
-      if (inputUnverified || !prompt || (await withPlanFile(prompt, options.claudeTranscript?.(body.pane_id)))!.id !== body.prompt_id) return promptChanged();
+      if (inputUnverified || !prompt) return promptChanged();
+      // a plan card's id carries its plan file's revision: the file as it is now must match too. A command approval's
+      // can carry the held hook request it showed: that request must still be held, and still the one on the screen
+      const heldId = heldRequestOf(prompt, body.prompt_id, agent, options.approvals);
+      if (heldId !== null ? !options.approvals!.holds(body.pane_id, approvalDialog(prompt)!, heldId)
+        : (await withPlanFile(prompt, options.claudeTranscript?.(body.pane_id)))!.id !== body.prompt_id) return promptChanged();
       log.matched = true;
       waitedOn = waitingKindOf(prompt) !== undefined;
 
@@ -1552,6 +1608,35 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
         || body.option_index !== undefined || body.option_indices !== undefined || body.custom_text !== undefined)) {
         return badRequest("invalid_answer", "Next goes to another question and answers none.");
       }
+      if (parsedPrompt?.responder === "opencode-permission" && parsedPrompt.openCodePermission) {
+        const { requestID, sessionID, decisions } = parsedPrompt.openCodePermission;
+        const decision = Number.isInteger(body.option_index) ? decisions[body.option_index!] : undefined;
+        if (decision === undefined || body.option_indices !== undefined || body.custom_text !== undefined || body.step_back !== undefined
+          || body.step_index !== undefined || body.draft !== undefined) return badRequest("invalid_answer", "A valid option index is required.");
+        const asking = askings.get(body.pane_id);
+        if (!(await openCodePaneOn(body.pane_id, sessionID, openCodeState, deadlineAt)) || deadline.aborted) return promptChanged();
+        // the service as it is right before the reply: still the one service.json names, and still a 2.x one
+        const service = await openCodeService(options.openCodeStateDir, deadline, { onWindows: true });
+        const config = service && openCodePermissionsRead(service.version) ? service.config : null;
+        if (!config) return jsonResponse({ error: { code: "service_unavailable", message: "OpenCode service is not available. Your answer has not been sent." } }, 502);
+        const replied = await replyOpenCodePermission(config, sessionID, requestID, decision, deadline);
+        if (replied.ok) {
+          delivered = true;
+          const sent = chatSent.get(body.pane_id)?.commands.at(-1);
+          if (sent?.dialogId === prompt.id) noteCommandEvidence(body.pane_id, sent.id, { kind: "native", at: Date.now() });
+          formsAnswered.set(body.pane_id, Date.now());
+          if (formsAnswered.size > 64) formsAnswered.delete(formsAnswered.keys().next().value!);
+          if (askings.get(body.pane_id) === asking) askingEnded(body.pane_id);
+          // answered: no read listing it from before the reply shows it again
+          const entry = openCodeState.entries.get(body.pane_id);
+          if (entry?.sessionID === sessionID && entry.permissions) entry.permissions = entry.permissions.filter((request) => request.id !== requestID);
+          return jsonResponse({ ok: true });
+        }
+        if (replied.status === 0) return jsonResponse({ error: { code: "reply_unconfirmed", message: "OpenCode may have received your answer, but its reply did not arrive. Check the request before sending again." } }, 504);
+        // answered meanwhile, from its terminal or another client
+        if (replied.status === 404) return promptChanged();
+        return jsonResponse({ error: { code: "reply_failed", message: `Failed to reply to OpenCode's permission request (HTTP ${replied.status}).` } }, 502);
+      }
       if (parsedPrompt?.responder === "opencode-question" && parsedPrompt.openCodeForm) {
         const openCodeForm = parsedPrompt.openCodeForm;
         if (!openCodeForm.available) return jsonResponse({ error: { code: "service_unavailable", message: "OpenCode service is not available. Your answer has not been sent." } }, 502);
@@ -1561,15 +1646,8 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
           && openCodeState.entries.get(body.pane_id) === state && state.revision === openCodeForm.revision
           && askings.get(body.pane_id) === asking && asking?.content === parsedPrompt.id;
         // The lookup above awaited HTTP. Neither its pane nor its form is a live binding now.
-        const stillBound = async (): Promise<boolean> => {
-          if (!current()) return false;
-          const before = openCodeState.checkpoint();
-          const snapshot = await openCodeState.snapshot(Math.max(1, deadlineAt - Date.now())).catch(() => null);
-          if (!snapshot) return false;
-          openCodeState.reconcile(snapshot.panes, before);
-          const live = snapshot.panes.find((candidate) => candidate.pane_id === body.pane_id);
-          return !!live && live.agent === "opencode" && opencodeSessionId(live) === openCodeForm.sessionID && current();
-        };
+        const stillBound = async (): Promise<boolean> =>
+          current() && await openCodePaneOn(body.pane_id, openCodeForm.sessionID, openCodeState, deadlineAt) && current();
         if (!(await stillBound())) return promptChanged();
         const navigating = body.step_back === true || body.step_index !== undefined;
         const supplied = [
@@ -1849,6 +1927,20 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
           if (!done && keys.pressed()) askingEnded(body.pane_id);
         }
       }
+
+      // Yes or No on a card built on a held hook request is that request's answer, with no key. Any other option goes as
+      // keys to the dialog on the screen, only where it shows that request's command, whole, and no other's
+      const decision = heldId === null || body.option_index === undefined || body.custom_text !== undefined ? null
+        : options.approvals!.decision(agent, prompt.options[body.option_index]?.label ?? "");
+      if (decision !== null && parsedPrompt?.responder === "claude-approval") {
+        // the request left since the read: no key either, as the dialog now on the screen may be another command's
+        if (!options.approvals!.answer(body.pane_id, approvalDialog(prompt)!, heldId!, decision)) return promptChanged();
+        delivered = true;
+        askingEnded(body.pane_id);
+        form.still = claudeStepStill(parsedPrompt);
+        return jsonResponse({ ok: true });
+      }
+      if (heldId !== null && !options.approvals!.showsOnly(body.pane_id, approvalDialog(prompt)!, heldId)) return promptChanged();
 
       let steps: AnswerStep[];
       try {
