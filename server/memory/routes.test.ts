@@ -54,11 +54,12 @@ describe("/api/memory", () => {
       origin: { by: "human", surface: "cli", at: new Date().toISOString() }, body: "", extra: {},
     }));
     const digest = (await view()).items.find((item) => item.id === id)!.digest;
-    for (const credentials of [
+    const rejectedCredentials: Record<string, string>[] = [
       { authorization: `Bearer ${BRIDGE_TOKEN}`, origin: cf.publicOrigin },
       { authorization: `Bearer ${BROWSER_TOKEN}`, origin: cf.publicOrigin },
       { cookie: `ovis_device=${WATCH_TOKEN}`, "x-forwarded-for": "100.64.0.9", origin: cf.publicOrigin },
-    ] satisfies Record<string, string>[]) {
+    ];
+    for (const credentials of rejectedCredentials) {
       expect(await codeOf(await post("/api/memory/confirm", { id, digest }, credentials))).toEqual([401, "cf_access_required"]);
     }
     expect(await codeOf(await post("/api/memory/confirm", { id, digest }, cf.originHeaders({ origin: "https://other.invalid" })))).toEqual([403, "invalid_origin"]);
