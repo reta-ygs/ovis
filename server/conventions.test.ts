@@ -449,9 +449,6 @@ describe("test servers", () => {
   const FROM_INDEX = /import\s*\{[^}]*\bcreateServer\b[^}]*\}\s*from\s*["'](?:\.\.?\/)+(?:server\/)?index\.ts["']/;
   const CALL = /(?<![.\w$])createServer\(/g;
   const OWN: Record<string, { calls: number; why: string }> = {
-    "server/copilot.contract.test.ts": { calls: 1, why: "node's net.createServer, inside the text of the stand-in Copilot script" },
-    "server/device-access.contract.test.ts": { calls: 1, why: "the default state folder, under an XDG_CONFIG_HOME the test made" },
-    "server/ipv6-loopback.contract.test.ts": { calls: 1, why: "a port the test took itself, to see the start fail" },
   };
 
   function closing(code: string, open: number): number {
