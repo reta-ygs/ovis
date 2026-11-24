@@ -45,7 +45,7 @@ import { awaited, CODEX_IMAGE_REF, CODEX_TOOL_IMAGE_REF, codexOutputPicture, cod
 import { type Held, heldOpenPlatform, openHeldDirectory } from "./held-open.ts";
 import { AmbiguousClaudeStore, claudeAttachSession, claudeProcessSession, claudeTranscriptFile, darwinProcess, defaultClaudeConfigDir, forgetClaudeSessionFile, forgetClaudeSessions, hintedClaudeConfigDir, isClaudeProcess, jobClaude, processClaudeConfigDir, windowsShellClaude } from "./claude-store.ts";
 import { coreSocket } from "./herdr-core/core-socket.ts";
-import { coreSocketPath } from "./herdr-core/runtime.ts";
+import { coreAcp, coreSocketPath } from "./herdr-core/runtime.ts";
 import { capabilities } from "./runtime/capabilities.ts";
 import { forgetGjcPane, forgetGjcState, gjcPidUnderShell, gjcTranscriptFileForPane, isGjcProcess, recentProcessTable, storeRelative } from "./gjc-runtime.ts";
 import { isOmoProcess, omoProcessIdentity, omoSessionForPane, processEnviron, processInfo as omoPaneProcessInfo, withOmoDescendants, type ProcessInfo as OmoProcessInfo } from "./omo.ts";
@@ -79,6 +79,7 @@ import { forgetHermesTranscriptState, hermesConversationPage, hermesToolOutput, 
 import { createOmpTranscriptParser, isContextClear, MAX_TURNS, omoTaskResults, parseOmpTranscript, PI_IMAGE_REF, PI_PROMPT_IMAGE_REF, piImageBlock, piMessage, piNotice, piPromptImages, piResults, type TranscriptParser, withHcNotes } from "./transcript-records.ts";
 import { skillPromptMessage } from "./skill-activity.ts";
 import { CLAUDE_IMAGE_REF, claudeImageType, claudeResultText, createClaudeTranscriptParser, entryHostToolResults, isHostHandoff, parseClaudeTranscript, type TranscriptEntry } from "./claude-transcript.ts";
+import { POLL_TOOL, REPL_TOOL, replDeliveries, replDispatched, replOutput, virtualCallOutput } from "./claude-code-mode.ts";
 import { forgetSubagents, lineNotifications, subagentDetails, type SubagentDetail } from "./claude-subagents.ts";
 import { launchedAgents } from "./launched-agents.ts";
 import { readsStartScreen, startScreenMetadata } from "./start-screen.ts";
@@ -1900,6 +1901,7 @@ type ResolvedTranscript =
 
 export type NativeTranscript =
   | ResolvedTranscript
+  | { source: "acp"; path: string }
   | { source: "devin-transcript"; path: string; session: string; cwd: string; binding?: string };
 
 /**
@@ -2064,6 +2066,8 @@ export async function paneTranscript(paneId: string, codexHome?: string, snapsho
   const panes = (snapshot ?? await sessionSnapshot()).panes;
   const pane = panes.find((candidate) => candidate.pane_id === paneId);
   if (pane === undefined) throw new ConversationUnavailable("pane_not_found");
+  const child = coreAcp()?.forPane(paneId);
+  if (child) return { source: "acp", path: child.client.history.path };
   if (typeof pane.cwd !== "string" || pane.cwd.length === 0) throw new ConversationUnavailable("no_recognized_transcript", undefined, pane.agent ? "agent_cwd_missing" : undefined);
 
   if (pane.agent === "devin" && !(await paneRunsOmo(paneId, known))) {
@@ -2126,7 +2130,7 @@ async function bottomViewport(paneId: string): Promise<string> {
 /** Read-only, same-user files only. The notes hc typed into the pane read as notices (withHcNotes). */
 export async function paneConversation(...args: Parameters<typeof readPaneConversation>): Promise<RecognizedConversation> {
   const conversation = await readPaneConversation(...args);
-  return { ...conversation, turns: withHcNotes(conversation.turns) };
+  return conversation.source === "acp" ? conversation : { ...conversation, turns: withHcNotes(conversation.turns) };
 }
 
 async function readPaneConversation(paneId: string, codexHome?: string, page: ConversationPage = {}, devinDbPath?: string, opencodeDb?: string, hermesHome?: string, grokHome?: string, museData?: string): Promise<RecognizedConversation> {
@@ -2202,6 +2206,11 @@ async function readPaneConversation(paneId: string, codexHome?: string, page: Co
     }
     if (page.before !== undefined || page.since !== undefined || page.from !== undefined) throw new HistoryChanged();
     return await notBegun(launch.source, launch.historyId);
+  }
+  if (resolved.source === "acp") {
+    const child = coreAcp()?.forPane(paneId);
+    if (!child || child.client.history.path !== resolved.path) throw new HistoryChanged();
+    return child.client.history.page(page);
   }
   if (resolved.source === "dsh-transcript") {
     rememberPaneRead(paneId, resolved.path);
@@ -2366,11 +2375,12 @@ async function readPaneConversation(paneId: string, codexHome?: string, page: Co
     try { revision = grokProjection(resolved.path, statSync(resolved.path)).revision; } catch {}
     if (revision === null || revision === "0") throw new ConversationUnavailable("transcript_missing");
   }
-  // The ledger never records the selected model. The live status row does, and a switch there
-  // writes no turn, so the answer is marked screen and the chat re-reads it on terminal output.
-  // A scroll or a failed read leaves the name unknown rather than one from an older frame, and is
-  // still marked screen so the next draw can fill it. The row is read before the store check below,
-  // so a pane that moved to another conversation during the read is refused, not given its model.
+  // The ledger records the model only with the next message. The live status row names it at once,
+  // and a switch there writes no turn, so the answer is marked screen and the chat re-reads it on
+  // terminal output. A scroll or a failed read keeps the ledger's model rather than one from an
+  // older frame, and is still marked screen so the next draw can fill it. The row is read before
+  // the store check below, so a pane that moved to another conversation during the read is
+  // refused, not given its model.
   const agyScreen = resolved.source === "agy-transcript" ? await screenMetadata("agy-transcript") : null;
   if (resolved.agy && !sameAgyStore(resolved.agy, await resolveAgyStore(snapshot.panes.find((pane) => pane.pane_id === paneId)!))) throw new ConversationUnavailable("no_session_path");
   // The screen read waits on herdr. A pane closed or bound to another session meanwhile has not
@@ -2418,11 +2428,17 @@ async function readPaneConversation(paneId: string, codexHome?: string, page: Co
   }
   if (agyScreen !== null) {
     // Enrich the response, never the shared page.
+    // Live screen wins when readable (e.g. a /model switch before the next turn);
+    // otherwise keep the transcript's recorded model/effort (e.g. herdr-core or a scrolled pane).
+    const model = agyScreen.model ?? answer.metadata.model;
+    const reasoning_effort = agyScreen.model !== null
+      ? agyScreen.reasoning_effort
+      : (agyScreen.reasoning_effort ?? answer.metadata.reasoning_effort);
     return {
       ...answer,
       screen: true,
-      metadata: { ...answer.metadata, ...agyScreen },
-      version: answerVersion(answer.version, `${agyScreen.model}\0${agyScreen.reasoning_effort}`),
+      metadata: { ...answer.metadata, model, reasoning_effort },
+      version: answerVersion(answer.version, `${model}\0${reasoning_effort}`),
     };
   }
   return answer;
@@ -2595,7 +2611,22 @@ export function transcriptPage(source: Exclude<StreamSource, "agy-transcript">, 
 }
 
 export async function agyTranscriptPage(path: string, page: ConversationPage = {}, codexHome?: string, authorized?: { dev: number; ino: number }): Promise<RecognizedConversation> {
-  try { return await withAgyHistory(path, (projection, fd) => ({ ...transcriptPageRead("agy-transcript", path, page, codexHome, projection, fd), activity: projection.activity }), authorized); }
+  try {
+    return await withAgyHistory(path, (projection, fd) => {
+      const read = transcriptPageRead("agy-transcript", path, page, codexHome, projection, fd);
+      const model = projection.model ?? read.metadata.model;
+      const reasoning_effort = projection.model !== null ? projection.reasoning_effort : (projection.reasoning_effort ?? read.metadata.reasoning_effort);
+      const metadata = { ...read.metadata, model, reasoning_effort };
+      return {
+        ...read,
+        metadata,
+        activity: projection.activity,
+        version: model !== read.metadata.model || reasoning_effort !== read.metadata.reasoning_effort
+          ? answerVersion(read.version, `${model}\0${reasoning_effort}`)
+          : read.version,
+      };
+    }, authorized);
+  }
   catch (error) {
     // every file thread busy: worth another try soon (http.ts answers 503); another file than the
     // authorized one is pending (withAgyHistory)
@@ -2691,6 +2722,11 @@ function transcriptPageRead(source: StreamSource, path: string, page: Conversati
 }
 
 export async function conversationImage(paneId: string, ref: string, codexHome?: string, opencodeDb?: string, grokHome?: string): Promise<{ mediaType: string; bytes: Uint8Array<ArrayBuffer> } | null> {
+  const child = coreAcp()?.forPane(paneId);
+  if (child) {
+    const asset = await child.client.history.asset(ref);
+    return typeof asset === "string" ? null : asset;
+  }
   if (!CLAUDE_IMAGE_REF.test(ref) && !CODEX_IMAGE_REF.test(ref) && !CODEX_TOOL_IMAGE_REF.test(ref) && !PI_IMAGE_REF.test(ref) && !PI_PROMPT_IMAGE_REF.test(ref) && !OPENCODE_IMAGE_REF.test(ref) && !GROK_IMAGE_REF.test(ref) && !COPILOT_IMAGE_REF.test(ref)) return null;
   const snapshot = await sessionSnapshot();
   const pane = snapshot.panes.find((candidate) => candidate.pane_id === paneId);
@@ -3236,6 +3272,11 @@ const TOOL_REF = /^[A-Za-z0-9_:.-]{1,128}$/;
 const TOOL_OUTPUT_MAX = 2_000_000;
 
 export async function toolOutput(paneId: string, ref: string, codexHome?: string, opencodeDb?: string, hermesHome?: string, grokHome?: string, museData?: string): Promise<string | null> {
+  const child = coreAcp()?.forPane(paneId);
+  if (child) {
+    const asset = await child.client.history.asset(ref);
+    return typeof asset === "string" ? asset : null;
+  }
   if (!TOOL_REF.test(ref) && !/^cp[0-9a-f]{16}\.[A-Za-z0-9_:.-]{1,128}(?:@[0-9a-z]+@[0-9a-z]+@[0-9a-f]{32})?$/.test(ref)) return null;
   const socket = herdrSocketPath();
   const forgetsBefore = forgets;
@@ -3622,7 +3663,27 @@ function outputInText(source: RecognizedConversation["source"], text: string, re
   // a senpi host tool result names its call inside its header's text, not as a JSON string
   const hostNeedle = `id=${ref}):`;
   let native: string | null = null;
+  // Code Mode: a REPL call whose script ran on answered `(dispatched #N)`; its output is in the events after it
+  // (claude-code-mode.ts), under its number
+  let script: { eval: number; parts: string[]; seen: Set<string> } | null = null;
+  // the call's tool, from its tool_use: only a REPL's result is read as one
+  let name: unknown = null;
   for (const line of text.split("\n")) {
+    if (script !== null && line.includes("repl-eval")) {
+      let entry: TranscriptEntry;
+      try { entry = JSON.parse(line) as TranscriptEntry; } catch { continue; }
+      const content = entry.message?.content;
+      const delivered = entry.type === "attachment" && entry.attachment?.type === "poll_events"
+        ? (Array.isArray(entry.attachment.envelopes) ? entry.attachment.envelopes : []).flatMap((envelope: unknown) => typeof envelope === "string" ? replDeliveries(envelope, true).outputs : [])
+        : entry.type === "user" && Array.isArray(content) ? content.flatMap((block: unknown) => (block as { type?: unknown } | null)?.type === "tool_result" ? replDeliveries(claudeResultText((block as { content?: unknown }).content)).outputs : []) : [];
+      for (const output of delivered) {
+        const key = output.at ?? `${script.seen.size}`;
+        if (output.eval !== script.eval || script.seen.has(key)) continue;
+        script.seen.add(key);
+        if (output.output.length > 0) script.parts.push(output.output);
+      }
+      continue;
+    }
     if (!line.includes(needle) && !(source === "claude-transcript" && line.includes(hostNeedle))) continue;
     let entry: Record<string, unknown>;
     try { entry = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
@@ -3631,8 +3692,25 @@ function outputInText(source: RecognizedConversation["source"], text: string, re
       const content = (entry.message as { content?: unknown } | undefined)?.content;
       const host = entryHostToolResults(entry, content).filter((result) => result.id === ref).at(-1);
       const result = Array.isArray(content) ? content.find((block) => (block as { type?: unknown; tool_use_id?: unknown } | null)?.type === "tool_result" && (block as { tool_use_id?: unknown }).tool_use_id === ref) : undefined;
+      const use = entry.type === "assistant" && Array.isArray(content) ? content.find((block) => (block as { type?: unknown; id?: unknown } | null)?.type === "tool_use" && (block as { id?: unknown }).id === ref) : undefined;
+      if (use !== undefined) name = (use as { name?: unknown }).name;
       if (host !== undefined) output = claudeResultText((content as unknown[]).slice(host.header + 1, host.end));
-      else if (result !== undefined && native === null && !isHostHandoff(result as { content?: unknown; is_error?: unknown })) native = claudeResultText((result as { content?: unknown }).content);
+      else if (result !== undefined && native === null && !isHostHandoff(result as { content?: unknown; is_error?: unknown })) {
+        native = claudeResultText((result as { content?: unknown }).content);
+        const repl = name === REPL_TOOL && (result as { is_error?: unknown }).is_error !== true;
+        const dispatched = repl ? replDispatched(native) : null;
+        const own = repl && dispatched === null ? replOutput(native) : null;
+        // a Code Mode Poll is drawn only for what it brought besides the scripts' output: that, as its row has it
+        const other = name === POLL_TOOL ? replDeliveries(native).other : [];
+        if (dispatched !== null) script = { eval: dispatched, parts: [], seen: new Set() };
+        // a REPL's own output element, whose script's late output follows under its number
+        else if (own !== null) {
+          native = own.output;
+          if (own.eval !== null) script = { eval: own.eval, parts: own.output.length > 0 ? [own.output] : [], seen: new Set() };
+        } else if (other.length > 0) native = other.join("\n\n");
+        // a script's call: its output is only in toolUseResult
+        else if (native.length === 0) native = virtualCallOutput(entry) ?? native;
+      }
     } else if (source === "codex-transcript") {
       const payload = entry.payload as { type?: unknown; call_id?: unknown; output?: unknown } | undefined;
       if ((payload?.type === "function_call_output" || payload?.type === "custom_tool_call_output") && payload.call_id === ref) output = codexOutputText(payload.output);
@@ -3642,6 +3720,7 @@ function outputInText(source: RecognizedConversation["source"], text: string, re
     }
     if (output !== null) return output.length > TOOL_OUTPUT_MAX ? `${output.slice(0, TOOL_OUTPUT_MAX)}\n… trimmed` : output;
   }
+  if (script !== null && script.parts.length > 0) native = script.parts.join("\n");
   return native !== null && native.length > TOOL_OUTPUT_MAX ? `${native.slice(0, TOOL_OUTPUT_MAX)}\n… trimmed` : native;
 }
 

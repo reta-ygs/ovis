@@ -18,6 +18,8 @@
   "server/herdr-update.test.ts": 1,
   "server/index.ts": 1,
   "server/mirror.test.ts": 4,
+  "server/output.contract.test.ts": 6,
+  "server/pending-input.contract.test.ts": 2,
   "server/prompt.ts": 1,
   "server/pty/session.test.ts": 4,
   "server/tailscale.test.ts": 1,

@@ -77,11 +77,9 @@ function testConfig(overrides: Partial<CfAccessConfig> = {}): CfAccessConfig {
 }
 
 describe("assertLoopbackBindHost", () => {
-  it("allows loopback hosts and rejects non-loopback hosts", () => {
-    for (const allowed of ["127.0.0.1", "::1", "[::1]", "localhost"]) {
-      expect(() => assertLoopbackBindHost(allowed)).not.toThrow();
-    }
-    for (const rejected of ["0.0.0.0", "::", "192.168.1.10", "100.64.0.1", ""]) {
+  it("allows only the fork's IPv4 loopback bind", () => {
+    expect(() => assertLoopbackBindHost("127.0.0.1")).not.toThrow();
+    for (const rejected of ["0.0.0.0", "::", "::1", "[::1]", "localhost", "192.168.1.10", "100.64.0.1", ""]) {
       expect(() => assertLoopbackBindHost(rejected)).toThrow();
     }
   });
@@ -416,6 +414,9 @@ describe("hardened createServer enforcement", () => {
       ["GET", "/api/portal"],
       ["GET", "/api/relay"],
       ["GET", "/api/account/session"],
+      ["POST", "/api/account/ssh-add"],
+      ["POST", "/api/access/tailscale/open"],
+      ["POST", "/api/access/tailscale/serve"],
       ["POST", "/api/bridge"],
       ["GET", "/api/runtime"],
       ["POST", "/api/runtime/move"],

@@ -17,7 +17,6 @@ export interface CfAccessVerifier {
   verify(assertion: string | null | undefined): Promise<CfAccessVerifyResult>;
 }
 
-const LOOPBACK_BIND_HOSTS = new Set(["127.0.0.1", "::1", "[::1]", "localhost"]);
 const TEAM_LABEL_RE = /^[a-z0-9-]+$/i;
 const AUD_RE = /^[0-9a-f]{64}$/i;
 const BASE64URL_RE = /^[A-Za-z0-9_-]+$/;
@@ -29,9 +28,9 @@ const JWKS_FETCH_TIMEOUT_MS = 5_000;
 const CLOCK_SKEW_SEC = 60;
 
 export function assertLoopbackBindHost(host: string): void {
-  if (!LOOPBACK_BIND_HOSTS.has(host)) {
+  if (host !== "127.0.0.1") {
     throw new Error(
-      `OVIS security policy requires HOST to be a loopback address (127.0.0.1, ::1, or localhost); got ${JSON.stringify(host)}`,
+      `OVIS security policy requires HOST to be a loopback address (127.0.0.1); got ${JSON.stringify(host)}`,
     );
   }
 }
