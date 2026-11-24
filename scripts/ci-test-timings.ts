@@ -15,7 +15,7 @@ const TABLE = "scripts/ci-test-timings.json";
 export const CHECK_ARTIFACT = /^((?:check-fast|integration-logs)-\d+)-(\d+)$/;
 
 export function testFiles(cwd = repo): string[] {
-  return [...new Bun.Glob("{src,shared,server,scripts,telemetry,push-relay,relay,integrations,tui}/**/*.test.{ts,tsx}").scanSync({ cwd })].sort();
+  return [...new Bun.Glob("{src,shared,server,scripts,integrations,tui}/**/*.test.{ts,tsx}").scanSync({ cwd })].sort();
 }
 
 /**
