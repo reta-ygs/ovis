@@ -6,6 +6,12 @@ export const ACTIVE_URL = "";
 export const NOTICE_GRACE_MS = 10 * 60_000;
 export const USAGE_RESEND_MS = 60 * 60_000;
 
+export interface VisitPane {
+  agent: string | null | undefined;
+  ovis?: boolean;
+  version?: string | null;
+}
+
 type Env = Record<string, string | undefined>;
 
 interface Timer {
@@ -84,12 +90,14 @@ export class Telemetry {
 
   tally(_counter?: string): void {}
 
+  paneStatus(_paneId: string, _status: string): void {}
+
   start(): void {}
 
   stop(): void {}
 
   active(
-    agents: readonly (string | null | undefined)[] | Promise<readonly (string | null | undefined)[]>,
+    agents: readonly VisitPane[] | Promise<readonly VisitPane[]>,
     _visit: { surface?: TelemetrySurface | null; ingress?: TelemetryIngress | null } = {},
   ): Promise<void> {
     Promise.resolve(agents).catch(() => {});

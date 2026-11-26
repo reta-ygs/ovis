@@ -16,7 +16,6 @@
   "scripts/ui-regression.ts": 13,
   "server/collector.ts": 1,
   "server/herdr-update.test.ts": 1,
-  "server/index.ts": 1,
   "server/mirror.test.ts": 4,
   "server/prompt.ts": 1,
   "server/pty/session.test.ts": 4,

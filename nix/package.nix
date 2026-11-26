@@ -64,7 +64,7 @@ let
 
     outputHashMode = "recursive";
     outputHashAlgo = "sha256";
-    outputHash = "sha256-8sC+ZGVKFa55RK4L9RM2/7WAseHhd3JCPLGuoImrC9o=";
+    outputHash = "sha256-U8zvg/GHaAg/KA8Q3qEDhOwuL0yeJGapX+1GGEM+3g4=";
   };
 in
 assert lib.versionAtLeast bun.version (
@@ -97,7 +97,7 @@ stdenvNoCC.mkDerivation {
   installPhase = ''
     runHook preInstall
     mkdir -p "$out/bin" "$out/share/ovis"
-    cp -a dist server shared scripts integrations package.json THIRD_PARTY_NOTICES.md UPSTREAM_SYNC.json node_modules "$out/share/ovis/"
+    cp -a dist server shared scripts integrations tui package.json THIRD_PARTY_NOTICES.md UPSTREAM_SYNC.json node_modules "$out/share/ovis/"
     makeWrapper "${bun}/bin/bun" "$out/bin/ovis-server" \
       --add-flags "$out/share/ovis/server/main.ts" \
       --set OVIS_MANAGED 0 \

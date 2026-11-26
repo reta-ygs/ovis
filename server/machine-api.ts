@@ -1,5 +1,6 @@
 import { subscribeMachineEvents } from "./machine-events.ts";
 import { wireMachine, wireMachineEvent, type WireMachine } from "../shared/compact-agents.ts";
+import { LOCAL_MACHINE } from "../shared/machines.ts";
 import type { DevicePairedEvent, DeviceRemovedEvent, MachineRoster, PendingRedemptionsEvent, RelayPairingsEvent, RemotePairingsEvent } from "../shared/machines.ts";
 import type { AgentRowTokens } from "../shared/pane-tokens.ts";
 import type { SharedPreferences } from "../shared/preferences.ts";
@@ -63,7 +64,7 @@ export const slowMachinePath = (path: string): boolean => path === "worktree/cre
  * forwards, so such a path must be no route at all rather than "some other route".
  */
 export const nonCanonicalPath = (pathname: string): boolean => pathname.includes("//") || (pathname.length > 1 && pathname.endsWith("/")) || /%2f|%5c/i.test(pathname);
-export const MACHINE_PROXY_PATH = /^(?:session|sessions\/(?:history|resume)|agents|agent-catalog(?:\/(?:install|sign-in))?|integrations|system|usage\/statusline|pane\/(?:read|scroll|find|selection|conversation(?:\/image|\/tool-output)?|summary|commands|files|docs|omo-tasks|background-agent|plan|artifacts|btw|prompt|prompt\/answer|input|keys|close|rename|image|split|zoom|swap|move|resize|clear|focus)|workspace\/(?:create|rename|move|close|directories|diff\/files|diff\/file|diff\/refs|git\/log|git\/branches|git\/show|pr|pr\/log|pr\/merge)|worktree\/(?:create|list|inventory|open|remove)|tab\/(?:create|rename|close|move|move-to-workspace)|layout\/ratio|agent\/(?:rename|commands)|plugins\/actions|plugin\/action|fs\/(?:stat|file|favicon|text))$/;
+export const MACHINE_PROXY_PATH = /^(?:session|sessions\/(?:history|resume)|agents|agent-catalog(?:\/(?:install|sign-in))?|integrations|system|usage\/statusline|pane\/(?:read|scroll|find|selection|conversation(?:\/image|\/tool-output)?|summary|commands|files|docs|omo-tasks|background-agent|plan|artifacts|btw|prompt|prompt\/answer|turn\/(?:cancel(?:-children)?|release)|input|keys|close|rename|image|split|zoom|swap|move|resize|clear|focus)|workspace\/(?:create|rename|move|close|directories|diff\/files|diff\/file|diff\/refs|git\/log|git\/branches|git\/show|pr|pr\/log|pr\/merge)|worktree\/(?:create|list|inventory|open|remove)|tab\/(?:create|rename|close|move|move-to-workspace)|layout\/ratio|agent\/(?:rename|commands)|plugins\/actions|plugin\/action|fs\/(?:stat|file|favicon|text))$/;
 
 
 
@@ -86,14 +87,15 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
       const asked = url.searchParams.getAll("verify_source_boot");
       // as the machine events tell it, for every answer below: without the token values herdr's rows hide
       // (withoutHiddenTokens), and without a PC's own agent_refs (wireMachine)
-      const shown = () => withoutHiddenTokens(herdrSidebar?.get() ?? null, manager.list()).map((machine) => wireMachine(machine, false));
+      const shown = () => withoutHiddenTokens(herdrSidebar?.get() ?? null,
+        manager.list().filter((machine) => machine.id === LOCAL_MACHINE)).map((machine) => wireMachine(machine, false));
       if (asked.length === 0) {
         if (url.searchParams.get("compact_agents") !== "1") return jsonResponse({ machines: shown() } satisfies MachineRoster);
         return jsonResponse({ machines: shown().map((machine) => wireMachine(machine, true)) } satisfies { machines: WireMachine[] });
       }
       if (asked.length > 1 || asked[0] === "") return fail("invalid_query", "verify_source_boot names one PC", 400);
       const machineId = asked[0]!;
-      if (machineId !== "local") return fail("disabled_by_policy", "Remote machine management is disabled on this server", 403);
+      if (machineId !== LOCAL_MACHINE) return fail("disabled_by_policy", "Remote machine management is disabled on this server", 403);
       const proof = await manager.verifySourceBoot(machineId, request.signal);
       if ("refused" in proof) {
         const response = fail("source_unverified", proof.refused === "interval" ? "This PC's server was asked a moment ago; ask again shortly" : "This PC's server could not be verified now", 503);

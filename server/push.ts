@@ -75,7 +75,8 @@ export interface PushService {
   firstStatus(paneId: string, created: AgentStatus, status: AgentStatus, machineId?: string): Promise<void>;
   onStatus(paneId: string, status: AgentStatus, machineId?: string): Promise<void>;
   onEnded(paneId: string, machineId?: string): Promise<void>;
-  onFailed(paneId: string, machineId?: string): Promise<void>;
+  movedQuestion(from: string, to: string, destinationNewer: boolean): void;
+  onFailed(paneId: string, machineId?: string, failedBeforeQueuedTurn?: true): Promise<void>;
   mutesChanged(): void;
   settled(): Promise<void>;
 }
@@ -192,6 +193,7 @@ export function createPushService(_options: PushServiceOptions): PushService {
     gone: () => {},
     closed: () => {},
     moved: () => {},
+    movedQuestion: () => {},
     firstStatus: async () => {},
     onStatus: async () => {},
     onEnded: async () => {},

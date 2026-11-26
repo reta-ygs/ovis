@@ -1,6 +1,7 @@
 import { userInfo } from "node:os";
 import type { RecoveryStanding } from "../../shared/account-devices-api.ts";
 import type { DeviceStore } from "../devices.ts";
+import { forgetPageMedia } from "../file-view.ts";
 import type { DeviceJournal } from "./device-journal.ts";
 import type { KeyProofPairings } from "./key-proof.ts";
 import type { PcAccountState } from "./pc-binding.ts";
@@ -8,6 +9,7 @@ import type { PendingRedemptions } from "./pending.ts";
 import { recoveryActs, type RecoverySeams } from "./recovery-acts.ts";
 import { openRecoverySocket, type RecoveryReleases } from "./recovery.ts";
 import { pcRecordId, SafetyLog } from "./safety-log.ts";
+import { restampAct } from "./restamp.ts";
 
 /** Wire the PC's stores into its local recovery socket. */
 export function openPcRecovery(options: {
@@ -19,6 +21,9 @@ export function openPcRecovery(options: {
   readonly releases: RecoveryReleases;
   readonly pending: PendingRedemptions | undefined;
   readonly pairings: KeyProofPairings | undefined;
+  readonly sibling?: string | null | undefined;
+  readonly retryRestamp?: boolean;
+  readonly restampEnabled: boolean;
 }) {
   const { stateDir, devices, pcAccount, journal, safetyLog, releases, pending, pairings } = options;
   // The log's freeze set already includes each standing block once.
@@ -26,7 +31,17 @@ export function openPcRecovery(options: {
     const { kind, id, target, account, signer } = record;
     return kind === "block" || kind === "freeze" ? [{ kind, id, target, account, signer }] : [];
   });
+  // a row the CLI ends loses the page media its renders were given, as one HTTP revoke ends (dispatch.ts)
+  const forgetMedia = (ids: string[]): string[] => {
+    for (const id of ids) forgetPageMedia({ device: id });
+    return ids;
+  };
   const seams: RecoverySeams = {
+    restamp: restampAct({
+      stateDir, sibling: options.sibling, journal,
+      install: process.env["OVIS_DESKTOP_APP"] === "1" ? "desktop" : process.env["HERDR_PLUGIN_ROOT"] ? "plugin" : "other",
+      problem: () => options.restampEnabled ? devices.restampRefusal(options.retryRestamp === true) : "Restamp is not available on this PC.",
+    }),
     pendingList: () => (pending?.list() ?? []).map(({ id, label, fingerprint }) => ({ id, label, fingerprint })),
     standing,
     admitPending: (id, fingerprint) => {
@@ -40,7 +55,11 @@ export function openPcRecovery(options: {
       }
       return pairings.approve(id, fingerprint, "recover");
     },
-    removeKey: (input) => devices.removeKey(input),
+    removeKey: (input) => {
+      const done = devices.removeKey(input);
+      if ("removed" in done) forgetMedia(done.removed);
+      return done;
+    },
     appendLift: (id, forget, user) => {
       const freezeId = id.startsWith("f:");
       const restriction = standing().find((entry) => entry.id === id);
@@ -64,13 +83,17 @@ export function openPcRecovery(options: {
       }
       return done;
     },
-    revokeAll: (user) => devices.revokeAll(user),
+    revokeAll: (user) => forgetMedia(devices.revokeAll(user)),
+    accountStatus: () => ({ account: devices.account(), members: devices.accountRows().members }),
   };
+  // The fork leaves the recovery socket's SSH account-add actions disabled along with relay enrollment.
   const handle = recoveryActs({ releases, logReadable: act => {
     if (!SafetyLog.open(stateDir).readable) return false;
     switch (act) {
+      case "restamp": return devices.restampRefusal(options.retryRestamp === true) === null;
       case "revoke_all": return devices.revokeAllError === null;
-      case "release": case "admit": case "lift": return devices.accountError === null;
+      case "account_status": return !devices.failsClosed && devices.accountError === null;
+      case "release": case "admit": case "lift": case "account_add_inspect": case "account_add_take": return devices.accountError === null;
       case "list": case "undo": case "remove": return !devices.failsClosed;
     }
   }, user: userInfo().username, seams });
