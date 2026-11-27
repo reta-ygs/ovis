@@ -3,7 +3,8 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, posix, sep } from "node:path";
-import { fixedSleepCounts, fixedSleeps, sleepFiles } from "./fixed-sleeps.ts";
+import { browserScriptFiles, demoLaunchCounts, demoLaunches, directContextCounts, directContexts } from "./direct-contexts.ts";
+import { fixedSleepCounts, fixedSleeps, markedWaitCounts, markedWaits, sleepFiles, turnWaitCounts, turnWaitFiles, turnWaits } from "./fixed-sleeps.ts";
 import { fail, files, lineOf, read, repo, stripComments } from "./source-scan.ts";
 
 const SOURCES = [...files("{src,server,shared,scripts,site,telemetry,integrations,tui}/**/*.{ts,tsx,mjs,js}"), "vite.config.ts"];
@@ -36,7 +37,7 @@ describe("imports", () => {
 });
 
 describe("the frontend build", () => {
-  const BUILD_SCRIPTS = ["vite.config.ts", "scripts/build-xterm.ts", "scripts/compressed-assets.ts", "scripts/service-worker-build.ts", "scripts/theme-bootstrap-build.ts", "scripts/shell-build.ts", "scripts/build-cache.ts"];
+  const BUILD_SCRIPTS = ["vite.config.ts", "scripts/compressed-assets.ts", "scripts/service-worker-build.ts", "scripts/theme-bootstrap-build.ts", "scripts/shell-build.ts", "scripts/build-cache.ts"];
 
   it("imports nothing from server/ or relay/", () => {
     const offenders = BUILD_SCRIPTS.flatMap((file) => specifiers(file).filter(({ specifier }) => /(?:^|\/)(?:server|relay)\//.test(specifier)).map(({ at }) => at));
@@ -118,16 +119,22 @@ describe("the ratchets' base", () => {
   });
 });
 
-describe("fixed sleeps", () => {
-  const baseline = JSON.parse(read("scripts/fixed-sleeps.json")) as Record<string, number>;
+/**
+ * Holds every file to its count in `json`, which may only shrink: never above the one at the ratchets' base, and
+ * lowered when the code has fewer. `instead` says what to do in place of raising it.
+ */
+function countRatchet({ json, what, counts, list, print, instead, covered = sleepFiles }: {
+  json: string; what: string; counts: () => Record<string, number>; list: (file: string) => string[]; print: string; instead: string; covered?: () => string[];
+}): void {
+  const baseline = JSON.parse(read(json)) as Record<string, number>;
 
   const committed = (): { counts: Record<string, number>; renames: Map<string, string> } | null => {
     const base = ratchetBase();
-    const json = base === null ? null : atBase(base, "scripts/fixed-sleeps.json");
-    return base === null || json === null ? null : { counts: JSON.parse(json) as Record<string, number>, renames: renamesSince(base) };
+    const text = base === null ? null : atBase(base, json);
+    return base === null || text === null ? null : { counts: JSON.parse(text) as Record<string, number>, renames: renamesSince(base) };
   };
 
-  it("never raises scripts/fixed-sleeps.json above the one at the ratchets' base", () => {
+  it(`never raises ${json} above the one at the ratchets' base`, () => {
     const at = committed();
     if (at === null) return;
     const before = at.counts;
@@ -136,22 +143,31 @@ describe("fixed sleeps", () => {
     fail([
       ...Object.entries(baseline).filter(([file, count]) => count > was(file)).map(([file, count]) => `${file}: ${count}, the base has ${was(file)}`),
       ...total(baseline) > total(before) ? [`total: ${total(baseline)}, the base has ${total(before)}`] : [],
-    ], "scripts/fixed-sleeps.json may only shrink: take the new fixed sleep out of the code instead (see the message of the test above for how). A renamed file takes its entry along with the same count, which keeps the total.");
+    ], `${json} may only shrink: ${instead} A renamed file takes its entry along with the same count, which keeps the total.`);
   });
 
-  it("adds no fixed sleep and lowers the baseline when one goes", () => {
-    const counts = fixedSleepCounts();
-    const grown = Object.entries(counts).filter(([file, count]) => count > (baseline[file] ?? 0));
-    fail(grown.flatMap(([file, count]) => [`${file}: ${count} fixed sleeps, baseline ${baseline[file] ?? 0}`, ...fixedSleeps(file).map((line) => `  ${line}`)]),
-      "Wait for the condition, not for a set time (AGENTS.md: bounded polls and deadlines, never fixed sleeps): poll in a loop bounded by a deadline (`const deadline = Date.now() + 10_000; while (!done()) { if (Date.now() > deadline) throw new Error(\"…\"); await Bun.sleep(25); }`), or race a timeout against the event (`Promise.race`). A wait that must be fixed (proving that nothing arrives, a settle gap herdr needs) says so with `// fixed wait: <why>` on its line or the line above. Never raise scripts/fixed-sleeps.json; when a file was renamed, move its entry to the new path with the same count.");
-    const shrunk = Object.entries(baseline).filter(([file, count]) => (counts[file] ?? 0) < count);
-    fail(shrunk.map(([file, count]) => `${file}: ${counts[file] ?? 0} now, baseline ${count}`),
-      "Fixed sleeps went away: lower these entries in scripts/fixed-sleeps.json to the counts shown (remove an entry at 0; `bun scripts/fixed-sleeps.ts` prints them all), so they cannot come back.");
+  it(`adds no ${what} and lowers the baseline when one goes`, () => {
+    const now = counts();
+    const grown = Object.entries(now).filter(([file, count]) => count > (baseline[file] ?? 0));
+    fail(grown.flatMap(([file, count]) => [`${file}: ${count} ${what}s, baseline ${baseline[file] ?? 0}`, ...list(file).map((line) => `  ${line}`)]),
+      `${instead} Never raise ${json}; when a file was renamed, move its entry to the new path with the same count.`);
+    const shrunk = Object.entries(baseline).filter(([file, count]) => (now[file] ?? 0) < count);
+    fail(shrunk.map(([file, count]) => `${file}: ${now[file] ?? 0} now, baseline ${count}`),
+      `These ${what}s went away: lower their entries in ${json} to the counts shown (remove an entry at 0; \`${print}\` prints them all), so they cannot come back.`);
   });
 
   it("lists only files that exist", () => {
-    fail(Object.keys(baseline).filter((file) => !existsSync(join(repo, file)) || !sleepFiles().includes(file)),
-      "Remove these entries from scripts/fixed-sleeps.json: the files are gone or no longer covered. A renamed file keeps its entry under the new path, with the same count.");
+    fail(Object.keys(baseline).filter((file) => !existsSync(join(repo, file)) || !covered().includes(file)),
+      `Remove these entries from ${json}: the files are gone or no longer covered. A renamed file keeps its entry under the new path, with the same count.`);
+  });
+}
+
+const WAIT_FOR_THE_CONDITION = "Wait for the condition, not for a set time (AGENTS.md: bounded polls and deadlines, never fixed sleeps): poll in a loop bounded by a deadline (`const deadline = Date.now() + 10_000; while (!done()) { if (Date.now() > deadline) throw new Error(\"…\"); await Bun.sleep(25); }`), or race a timeout against the event (`Promise.race`).";
+
+describe("fixed sleeps", () => {
+  countRatchet({
+    json: "scripts/fixed-sleeps.json", what: "fixed sleep", counts: fixedSleepCounts, list: fixedSleeps, print: "bun scripts/fixed-sleeps.ts",
+    instead: `${WAIT_FOR_THE_CONDITION} A wait that must be fixed (proving that nothing arrives, a settle gap herdr needs) says so with \`// fixed wait: <why>\` on its line or the line above, and counts in scripts/fixed-waits.json instead.`,
   });
 
   it("tells a fixed sleep from a bounded poll", () => {
@@ -198,10 +214,9 @@ describe("names from before Ovis", () => {
     "src/lib/legacyStorage.test.ts": "tests that move",
     "server/auth.ts": "still accepts and clears the old cookies",
     "server/auth.test.ts": "tests the old cookies",
-    "server/pty/pty-host.mjs": "keeps the token from the attach under either name",
-    "server/pty/session.ts": "keeps the token from the sidecar under either name",
-    "crates/pty-sidecar/src/pty.rs": "keeps the token from the attach under either name, as pty-host.mjs does",
-    "server/pty/host.test.ts": "tests that both PTY hosts keep the token from the command under either name",
+    "server/pty/session.ts": "keeps the token from the PTY host under either name",
+    "crates/pty-sidecar/src/pty.rs": "keeps the token from the attach under either name",
+    "server/pty/host.test.ts": "tests that the PTY host keeps the token from the command under either name",
     "server/remote-host.ts": "a remote bundle published before the rename reads the old name",
     "install.sh": "reads the old settings of an earlier install",
     "scripts/plugin-tui.ts": "withholds the old token name from ovis tui too, as a shell set up for an earlier install may export it",

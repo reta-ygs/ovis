@@ -12,7 +12,7 @@ import { scheduleCfAccessExpiry, type CfAccessVerifier } from "./cf-access.ts";
 import type { DeviceMatch, DeviceStore } from "./devices.ts";
 import { handlePreferencesRequest, type PreferenceStore } from "./preferences.ts";
 import { handleSeenRequest, type SeenStore } from "./seen.ts";
-import { badRequest, errorResponse, jsonResponse, setRequestRoute, wordedHeaders, wordHerdrFailures } from "./http.ts";
+import { badRequest, errorResponse, jsonResponse, readJsonObject, setRequestRoute, wordedHeaders, wordHerdrFailures } from "./http.ts";
 import { serveStatic } from "./static.ts";
 import { compressResponse } from "./compress.ts";
 import { handleTasksRequest } from "./tasks-routes.ts";
@@ -28,6 +28,8 @@ import { handleAgentCatalogRequest } from "./agent-catalog-routes.ts";
 import { type AgentInstaller, INSTALL_PATH } from "./agent-catalog-install.ts";
 import { textEditAllowed } from "./file-edit.ts";
 import { handleFileRequest } from "./file-routes.ts";
+import { handleMachineFileRequest } from "./herdr-core/machine-files.ts";
+import { paneContext } from "./pane-context.ts";
 import { BACKGROUND_AGENT_PATH, handleBackgroundAgentRequest } from "./background-agent.ts";
 import { paneGet, ping } from "./herdr/client.ts";
 import { version } from "../package.json";
@@ -35,6 +37,8 @@ import { RUNTIME_MOVE_ROUTE } from "./runtime-move.ts";
 import type { MoveService } from "./runtime-move-service.ts";
 import { handlePushRequest } from "./push.ts";
 import { handlePromptRequest, type OpenCodePromptState } from "./prompt.ts";
+import type { ApprovalHub } from "./approvals/hub.ts";
+import type { AcpChildren } from "./acp/children.ts";
 import { attachableIdentity } from "./pty/sidecar.ts";
 import { runtime } from "./herdr-core/runtime.ts";
 import { handleUpdateRequest } from "./update-api.ts";
@@ -46,6 +50,11 @@ import type { KeyProofPairings } from "./account/key-proof.ts";
 import type { lockRoutes } from "./account/lock-routes.ts";
 import type { LockSignal } from "./lock-boundary.ts";
 import type { AccountMailbox } from "./account/mailbox.ts";
+import type { ListAdd } from "./account/list-add.ts";
+import type { ListFollow } from "./account/list-follow.ts";
+import type { AccountWitness } from "./account/witness.ts";
+import type { JoinNotices } from "./join-notices.ts";
+import type { TailnetNodes } from "./tailnet-nodes.ts";
 import type { AccountHolds } from "./account/holds.ts";
 import type { SafetyLog } from "./account/safety-log.ts";
 import type { CatchUpGate } from "./account/catch-up-gate.ts";
@@ -59,6 +68,7 @@ import { handleUserFontsRequest } from "./user-fonts.ts";
 import { USER_FONTS_PATH } from "../shared/user-fonts.ts";
 import type { UsageAccountList } from "./usage-account-list.ts";
 import { handleVoiceRequest } from "./voice.ts";
+import { handleMemoryRequest } from "./memory/routes.ts";
 import { BRIDGE_PROTOCOL } from "../shared/machines.ts";
 import { handleMachineRequest, nonCanonicalPath, type EventStreamBudget } from "./machine-api.ts";
 import { handleSessionHistoryRequest, handleSessionResumeRequest, SESSION_HISTORY_PATH, SESSION_RESUME_PATH } from "./session-history-routes.ts";
@@ -69,11 +79,12 @@ import type { RelayReceiptIds } from "./machine-relay.ts";
 import { sameOrigin } from "./machine-security.ts";
 import { handlePluginRequest } from "./plugin-routes.ts";
 import type { createServer } from "./index.ts";
-import type { TailnetIdentity } from "./tailscale.ts";
+import type { TailnetIdentity, TailnetNode } from "./tailscale.ts";
 import type { CLIProxyRoutes } from "./cliproxy-routes.ts";
 import type { UsageLoginService } from "./usage-login.ts";
 import type { UsageService } from "./usage.ts";
 import type { VoiceService } from "./voice.ts";
+import type { MemoryStore } from "./memory/store.ts";
 
 type PortalStartup = { ok: true } | { ok: false; error: unknown };
 
@@ -87,6 +98,8 @@ export interface RequestServices {
   readonly bridgeToken: string;
   readonly bootId: string;
   readonly devices: DeviceStore;
+  /** the joins no window of this PC has seen yet (server/join-notices.ts) */
+  readonly joins: JoinNotices;
   readonly accountMailbox: AccountMailbox;
   readonly accountIntroductions: AccountIntroductions;
   readonly accountHolds: AccountHolds;
@@ -97,17 +110,31 @@ export interface RequestServices {
   checkAccountFreshness(): void;
   /** Step 2 (S2-25): the account-joined rows of this PC's relay identity; null with the release flag off. */
   readonly accountRows: ReturnType<typeof accountRowsFor> | null;
+  /** This PC following its account's signed list (server/account/list-follow.ts); null with the release flag off. */
+  readonly accountList: ListFollow | null;
+  /** Adding this PC to an account that keeps a signed list (server/account/list-add.ts); null with the release flag off. */
+  readonly listAdd: ListAdd | null;
+  /** For how long this PC has let each key of its account in (server/account/witness.ts); null with the release flag off. */
+  readonly accountWitness: AccountWitness | null;
+  /** On a server that follows no list (Step 2 off): looks whether another Ovis on this folder pinned the PC, and then closes this server's account part. Null on a server that follows its list itself. */
+  readonly pinWatch: (() => void) | null;
   readonly preferences: PreferenceStore;
   readonly herdrSidebar: HerdrSidebarConfig;
   /** `loginPath`: the request states a Tailscale login, so the PC's own login must be known, not merely cached as unknown */
   readonly identityOf: (grantPath: boolean, host: string | null, loginPath?: boolean) => Promise<TailnetIdentity>;
   readonly serveOnly: boolean;
+  /** the tailnet nodes this PC keeps out (server/tailnet-nodes.ts), and the WhoIs read that names a request's node */
+  readonly tailnetNodes: TailnetNodes;
+  readonly whoisNode: (address: string) => Promise<TailnetNode | null>;
   readonly portalGuards: () => { tokenSet: boolean; serveOnly: boolean };
   readonly shellAgents: ShellAgentLocator;
   readonly agentDetector: AgentDetector;
   readonly agentOffered: (kind: string) => Promise<boolean>;
   readonly agentInstaller: AgentInstaller;
   readonly openCodeState: OpenCodePromptState;
+  readonly approvals: ApprovalHub;
+  /** the agents this server drives over ACP (server/acp/children.ts); null off this PC's herdr-core */
+  readonly acp: AcpChildren | null;
   readonly cliProxyRoutes: CLIProxyRoutes;
   readonly usageLogin: UsageLoginService;
   readonly usage: UsageService;
@@ -116,6 +143,8 @@ export interface RequestServices {
   /** the state folder's fonts/, served to every device that may read this PC (server/user-fonts.ts) */
   readonly fontsDir: string;
   readonly voice: VoiceService;
+  /** Settings → Memory's notes for agents (server/memory/store.ts) */
+  readonly memory: MemoryStore;
   readonly browserSnapshot: <S extends SessionSnapshot>(snapshot: S) => S;
   readonly core: ReturnType<typeof createCore>;
   readonly seen: SeenStore;
@@ -131,6 +160,13 @@ export interface RequestServices {
   readonly pendingRedemptions?: PendingRedemptions;
   /** pairings that prove their key and wait for this PC's screen (server/account/key-proof.ts); Linux with the flag only */
   readonly keyProofPairings?: KeyProofPairings;
+  /**
+   * Opens this PC's local confirm page in a browser on its own desktop, as `ovis confirm` does, so its port stays in no
+   * answer (R8). False when no page listens or there is no desktop to open it on.
+   */
+  readonly openConfirmPage?: () => Promise<boolean>;
+  /** the tailscale CLI /api/access reads and POST /api/access/tailscale/serve runs; unset, the one this PC has */
+  readonly tailscaleBinary?: string | null | undefined;
   /** puts a waiting key on this PC's screen */
   readonly askScreenForKey?: (entry: PendingRedemption) => void;
   /** /api/account/lock and /unlock (server/account/lock-routes.ts); only with the release flag */
@@ -174,6 +210,7 @@ function disabledPolicyResponse(method: string, path: string): Response | null {
     || matchesPrefix(path, "/api/portal")
     || matchesPrefix(path, "/api/relay")
     || matchesPrefix(path, "/api/account")
+    || matchesPrefix(path, "/api/access/tailscale")
     || matchesPrefix(path, "/api/bridge")
     || matchesPrefix(path, "/api/runtime")
     || RUNTIME_MOVE_ROUTE.test(path)
@@ -194,7 +231,7 @@ function disabledPolicyResponse(method: string, path: string): Response | null {
 const OTHER_MACHINE_FILES = /^\/api\/(?:fs\/|pane\/(?:files|docs|image)$|workspace\/(?:diff\/|git\/|directories$|pr(?:$|\/)))/;
 
 export async function handleRequest(request: Request, ctx: ServerContext): Promise<Response | undefined> {
-  const { options, hostname, bootId, preferences, herdrSidebar, shellAgents, agentDetector, agentOffered, agentInstaller, openCodeState, cliProxyRoutes, usageLogin, usage, voice, browserSnapshot, core, seen, piReader, orderSequence, requestLog, portalStartupResult, portalStartup, cfAccess } = ctx.services;
+  const { options, hostname, bootId, preferences, herdrSidebar, shellAgents, agentDetector, agentOffered, agentInstaller, openCodeState, approvals, acp, cliProxyRoutes, usageLogin, usage, voice, browserSnapshot, core, seen, piReader, orderSequence, requestLog, portalStartupResult, portalStartup, cfAccess } = ctx.services;
   const { sidecar, serialize, push, omo, claudeAgents, opencodeAgents, plans, clientSnapshot, machines, broadcastAll, collector, queueFirstMessage, askFirstMessage } = core;
   return requestLog.handle(request, async (headers) => {
   if (options.profile === "machine") wordHerdrFailures(machineFailure, machineLayoutReason);
@@ -248,7 +285,12 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
 
   if (options.localFiles === false && OTHER_MACHINE_FILES.test(pathname)) {
     setRequestRoute(pathname);
-    return jsonResponse({ error: { code: "unsupported", message: "Files on another machine of herdr-core are not reachable from Ovis yet" } }, 501);
+    const paneCwd = (paneId: string) => paneContext(paneId).then((context) => context.cwd, () => null);
+    try {
+      const served = options.machineFiles ? await handleMachineFileRequest(request, url, pathname, options.machineFiles(), paneCwd) : null;
+      if (served !== null) return served;
+    } catch (error) { return errorResponse(error); }
+    return jsonResponse({ error: { code: "unsupported", message: "Diffs, git, edits and searches of another machine of herdr-core are not reachable from Ovis yet" } }, 501);
   }
 
   if (pathname === "/api/machines" || pathname.startsWith("/api/machines/")) {
@@ -333,6 +375,11 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
   if (pathname === "/api/usage/login/prompt" || pathname === "/api/usage/login/code" || pathname === "/api/usage/login/cancel") { setRequestRoute(pathname); return usageLogin.handlePrompt(request, readOnly, loginOwner); }
   if (pathname === "/api/cliproxy" || pathname.startsWith("/api/cliproxy/")) { ctx.timeout(request, 60); return cliProxyRoutes.handle(request); }
   if (pathname === "/api/voice" || pathname.startsWith("/api/voice/")) { ctx.timeout(request, 120); return handleVoiceRequest(request, pathname, voice); }
+  // Settings → Memory: every change is a person's on a screen; the bridge token never reaches it (not a bridge path)
+  if (pathname === "/api/memory" || pathname.startsWith("/api/memory/")) {
+    const by = access.level !== "full" ? "unknown" : access.device ? `device:${access.device.id}` : access.via;
+    return handleMemoryRequest(request, url, ctx.services.memory, { readOnly, by });
+  }
 
   if (pathname === "/api/push" || pathname.startsWith("/api/push/")) {
     try {
@@ -417,7 +464,7 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
   const pluginResponse = await handlePluginRequest(request, url, pathname, options);
   if (pluginResponse) return pluginResponse;
 
-  const paneResponse = await handlePaneRequest(request, url, pathname, options);
+  const paneResponse = await handlePaneRequest(request, url, pathname, { ...options, approvals });
   if (paneResponse) return paneResponse;
 
   const tasksResponse = await handleTasksRequest(request, url, pathname, { omo, claudeAgents, opencodeAgents });
@@ -451,9 +498,42 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
     return handleSessionResumeRequest(request, { readOnly, stores: { codexHome: options.codexHome, opencodeDb: options.opencodeDb, hermesHome: options.hermesHome }, holdOpen: (seconds) => ctx.timeout(request, seconds) });
   }
 
+  if (acp && (pathname === "/api/pane/turn/cancel" || pathname === "/api/pane/turn/release" || pathname === "/api/pane/turn/cancel-children")) {
+    setRequestRoute(pathname);
+    if (request.method !== "POST") return badRequest("method_not_allowed", "Use POST.");
+    const body = await readJsonObject(request);
+    if (body instanceof Response) return body;
+    if (typeof body.pane_id !== "string") return badRequest("missing_pane_id", "pane_id is required.");
+    if (pathname.endsWith("/cancel-children")) {
+      // every ACP child the pane started gets the same hold as its own Stop; one a person holds already keeps its hold
+      // (a new one would cancel the turn that person started), and one that cannot take it is named
+      let children;
+      try { children = await acp.childrenOf(body.pane_id); } catch (error) { return errorResponse(error); }
+      const tried = await Promise.allSettled(children.ready.map(async child => {
+        if (!child.client.connected || !child.client.session) throw new Error("not connected");
+        if (child.client.holdGeneration !== null) return { pane_id: child.terminal, child_id: child.id, generation: child.client.holdGeneration };
+        return { pane_id: child.terminal, child_id: child.id, generation: await child.client.hold(child.client.session) };
+      }));
+      return jsonResponse({
+        ok: true,
+        held: tried.flatMap(outcome => outcome.status === "fulfilled" ? [outcome.value] : []),
+        failed: [...children.opening, ...children.ready.filter((_, index) => tried[index]?.status === "rejected").map(child => child.terminal)],
+      });
+    }
+    const child = acp.forPane(body.pane_id);
+    if (!child?.client.connected || !child.client.session) return badRequest("unavailable", "No connected ACP child.");
+    const cancel = pathname.endsWith("/cancel");
+    if (!cancel && (body.child_id !== child.id || !Number.isSafeInteger(body.generation))) return badRequest("hold_changed", "The child and hold generation are required.");
+    try {
+      if (cancel) return jsonResponse({ ok: true, child_id: child.id, generation: await child.client.hold(child.client.session) });
+      const receipt = await child.client.request("_keeper/release", { sessionId: child.client.session, generation: body.generation });
+      if (!receipt || typeof receipt !== "object" || !("released" in receipt && receipt.released === true)) return badRequest("unavailable", "No keeper receipt.");
+      return jsonResponse({ ok: true, child_id: child.id, ...receipt });
+    } catch { return badRequest("hold_changed", "The keeper could not confirm that operation."); }
+  }
   if (pathname.startsWith("/api/pane/prompt")) {
     try {
-      const response = await handlePromptRequest(request, url, { serialize, codexHome: options.codexHome, claudeTranscript: (paneId) => claudeAgents.sessionOf(paneId)?.path ?? null, readOnly, openCodeStateDir: options.openCodeStateDir, openCodeState, onAnswered: () => options.telemetry?.tally("prompt_answers") });
+      const response = await handlePromptRequest(request, url, { serialize, codexHome: options.codexHome, claudeTranscript: (paneId) => claudeAgents.sessionOf(paneId)?.path ?? null, readOnly, openCodeStateDir: options.openCodeStateDir, openCodeState, approvals, ...(acp ? { acp } : {}), ...(options.telemetry ? { onAnswering: (paneId: string) => options.telemetry!.answering(paneId) } : {}) });
       if (response) return response;
     } catch (error) {
       return errorResponse(error);

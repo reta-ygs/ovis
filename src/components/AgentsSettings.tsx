@@ -19,6 +19,7 @@ import { useSettings } from "../lib/settings.ts";
 import { openSetupGuide } from "../lib/setupGuide.ts";
 import { canSignInAgain, glanceWindow, isHubAccount, isSignIn, meterText, moveInOrder, orderProviders, PROVIDER_MARK, PROVIDER_NAME, recordedBy, recordedNote, usageName, useStatuslineSwitch, useUsage, windowLabel } from "../lib/usage.ts";
 import { userErrorMessage, type UserError } from "../lib/userError.ts";
+import { AgentCallsRows } from "./AgentCallsRows.tsx";
 import { AgentMark } from "./AgentMark.tsx";
 import { AgentTile } from "./AgentTile.tsx";
 import { ConfirmDialog } from "./ConfirmDialog.tsx";
@@ -35,6 +36,8 @@ type Translate = ReturnType<typeof useT>;
 export interface AgentsSettingsProps {
   /** a watching device reads the page, but installs, signs in and adds nothing */
   watching: boolean;
+  /** this PC serves herdr-core, whose agents Ovis can give the tool to start other agents */
+  agentCalls?: boolean;
   onLocalLogin: (paneId: string) => void;
   onOpenPane: (machineId: string, paneId: string) => void;
   onOpenGuide: () => void;
@@ -230,7 +233,8 @@ function ProviderAccounts({ id, providers, removed, onLocalLogin, onFollow }: { 
   </>;
 }
 
-function stateLine(entry: AgentsPageRow, read: boolean, t: Translate): { text: string; tone: "ok" | "warn" | "none" | "dim" } {
+function stateLine(entry: AgentsPageRow, read: boolean, usesGeminiApiKey: boolean, t: Translate): { text: string; tone: "ok" | "warn" | "none" | "dim" } {
+  if (usesGeminiApiKey) return { text: t("Using a Gemini API key"), tone: "dim" };
   const state = signInState(entry.provider, entry.accounts, read, entry.missing);
   switch (state.kind) {
     case "unknown": return { text: t("Installed"), tone: "dim" };
@@ -259,12 +263,13 @@ function AgentItem({ entry, open, onToggle, allProviders, removed, read, limitsO
 }) {
   const t = useT();
   const { agent, provider, accounts } = entry;
-  const line = stateLine(entry, read, t);
+  const usesGeminiApiKey = agent.state.auth_mode === "gemini-api-key";
+  const line = stateLine(entry, read, usesGeminiApiKey, t);
   const again = read && !watching ? accounts.filter(canSignInAgain) : [];
   // an account another tool recorded is listed here, but the agent itself is still to be signed in
   const signedIn = accounts.filter(isSignIn);
   const detailsId = `agents-details-${agent.id}`;
-  const action = open || watching || !read || provider === null || (entry.missing !== null && signedIn.length === 0) ? null
+  const action = usesGeminiApiKey || open || watching || !read || provider === null || (entry.missing !== null && signedIn.length === 0) ? null
     : again.length === 1 ? <UsageSignInAgain usage={again[0]!} onStarted={onLocalLogin} onFollow={onFollow} />
       : signedIn.length === 0 ? <button type="button" className="btn agents-row-action" aria-label={t("Sign in to {agent}", { agent: agent.name })} onClick={() => provider === "claude" || provider === "codex" ? onFollow({ provider, default: true }) : onAddAccount(provider)}><KeyRound aria-hidden="true" /><span className="agents-row-action-label">{t("Sign in")}</span></button>
         : null;
@@ -288,7 +293,7 @@ function AgentItem({ entry, open, onToggle, allProviders, removed, read, limitsO
       </div>
       {open && <div className="agents-details" id={detailsId}>
         {agent.state.meets_min_version === false && agent.min_version !== null && <p className="agents-detail-note settings-condition">{t("Ovis needs {version} or later.", { version: agent.min_version.version })}</p>}
-        {provider !== null && (read ? <>
+        {!usesGeminiApiKey && provider !== null && (read ? <>
           {entry.missing !== null && <p className="agents-detail-note settings-condition" role="status">{t("Ovis reads {agent}'s sign-in from the desktop keyring with {command}, which this PC does not have. Install it (the libsecret-tools package on Debian and Ubuntu, libsecret on Fedora and Arch), then open this page again.", { agent: agent.name, command: entry.missing })}</p>}
           <div className="agents-detail-head">
             <span>{t("Accounts")} <span className="usage-account-count">{accounts.length}</span></span>
@@ -296,7 +301,7 @@ function AgentItem({ entry, open, onToggle, allProviders, removed, read, limitsO
           </div>
           {(entry.missing === null || accounts.length > 0) && <ProviderAccounts id={provider} providers={allProviders} removed={removed} onLocalLogin={watching ? undefined : onLocalLogin} onFollow={onFollow} />}
         </> : <p className="agents-detail-note" role="status">{limitsOn ? t("Loading…") : t("Turn on plan limits to see accounts.")}</p>)}
-        {provider === null && signIn !== null && (local && signIn.provider === null
+        {!usesGeminiApiKey && provider === null && signIn !== null && (local && signIn.provider === null
           ? <p className="agents-detail-note">{signIn.in_agent !== null ? t("{agent} signs in inside the agent ({how}). Ovis cannot read that sign-in, so it shows none here.", { agent: agent.name, how: signIn.in_agent }) : t("Ovis cannot read {agent}'s sign-in, so it shows none here.", { agent: agent.name })}</p>
           : !local && signIn.provider !== null ? <p className="agents-detail-note">{t("Accounts are read on the PC Ovis runs on: they are under Other accounts.")}</p> : null)}
         {(OWN_ROWS.has(agent.id) || (isBrowserToolAgent(agent.id) && local)) && <div className="settings-card agents-detail-card"><AgentOwnRows agentId={agent.id} /></div>}
@@ -338,7 +343,7 @@ function SectionHead({ children }: { children?: ReactNode }) {
   return <div className="agents-head">{children}</div>;
 }
 
-export function AgentsSettings({ watching, onLocalLogin, onOpenPane, onOpenGuide }: AgentsSettingsProps) {
+export function AgentsSettings({ watching, agentCalls = false, onLocalLogin, onOpenPane, onOpenGuide }: AgentsSettingsProps) {
   const t = useT();
   const { settings } = useSettings();
   const searching = useContext(SettingsQuery).length > 0;
@@ -346,7 +351,7 @@ export function AgentsSettings({ watching, onLocalLogin, onOpenPane, onOpenGuide
   const machineId = useMachineId();
   const local = machineId === "local";
 
-  const [catalog, setCatalog] = useState<{ machineId: string; agents: AgentCatalogRow[]; pathProblem: string | null } | null>(null);
+  const [catalog, setCatalog] = useState<{ machineId: string; agents: AgentCatalogRow[]; pathProblem: string | null; windows: boolean } | null>(null);
   const [catalogError, setCatalogError] = useState<UserError | null>(null);
   const [reads, setReads] = useState(0);
   const [checking, setChecking] = useState(false);
@@ -357,7 +362,7 @@ export function AgentsSettings({ watching, onLocalLogin, onOpenPane, onOpenGuide
     setCatalogError(null);
     setChecking(true);
     fetchAgentCatalog(machineId, abort.signal, reads > 0).then(
-      (answer) => setCatalog({ machineId, agents: answer.agents, pathProblem: answer.path_problem ?? null }),
+      (answer) => setCatalog({ machineId, agents: answer.agents, pathProblem: answer.path_problem ?? null, windows: answer.platform === "windows" }),
       (reason: unknown) => {
         if (abort.signal.aborted) return;
         setCatalogError(reason instanceof ApiError && reason.status === 404 ? { message: t("This PC's Ovis cannot install agents yet. Update it, then try again."), detail: null } : userErrorMessage(reason));
@@ -418,6 +423,7 @@ export function AgentsSettings({ watching, onLocalLogin, onOpenPane, onOpenGuide
   const otherIntegrations = page?.otherIntegrations ?? [];
   return (
     <SettingsBare.Provider value={true}>
+      {local && agentCalls && catalog?.windows !== true && <AgentCallsRows agents={agents ?? []} watching={watching} />}
       {/* the first-run guide again (lib/setupGuide.ts): it sets up this PC, and a watching device is never shown it */}
       {!watching && local && <SettingsGroup section="guide">
         <SettingsRow icon={Compass} label={t("Setup guide")} description={t("Opens the first-run guide again, from its first step, to install coding agents on this PC and connect them. What was set up before stays as it is.")}>
@@ -444,9 +450,13 @@ export function AgentsSettings({ watching, onLocalLogin, onOpenPane, onOpenGuide
       </section>
 
       <SettingsBare.Provider value="rows">
-        {ownGroups.map((id) => <SettingsGroup key={id} title={OWN_NAMES[id]!} section={`agent-${id}`}>
-          <AgentOwnRows agentId={id} />
-        </SettingsGroup>)}
+        {ownGroups.map((id) => {
+          const notInstalled = !checking && catalogError === null && catalog?.pathProblem === null && agents?.find((agent) => agent.id === id)?.state.installed === false;
+          return <SettingsGroup key={id} title={OWN_NAMES[id]!} section={`agent-${id}`} keepNote
+            note={notInstalled ? t("Not installed on this PC. These settings apply once it is installed here.") : undefined}>
+            <AgentOwnRows agentId={id} />
+          </SettingsGroup>;
+        })}
       </SettingsBare.Provider>
 
       {otherIntegrations.length > 0 && <details className="settings-section agents-more" data-section="integrations" tabIndex={-1} open={searching || undefined}>

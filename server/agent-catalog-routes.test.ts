@@ -34,7 +34,9 @@ describe("GET /api/agent-catalog", () => {
     mkdirSync(state);
     writeFileSync(join(state, "devices.json"), JSON.stringify({ gate_closed_at: new Date().toISOString(), devices: [{ id: "0123456789abcdef", label: "Watch fixture", role: "watch", token_hash: createHash("sha256").update(WATCH_TOKEN).digest("hex"), created_at: new Date().toISOString(), last_seen_at: null }] }), { mode: 0o600 });
     const home = join(root, "home");
-    mkdirSync(home);
+    const agyData = join(home, ".gemini", "antigravity-cli");
+    mkdirSync(agyData, { recursive: true });
+    writeFileSync(join(agyData, "settings.json"), '{"modelProvider":"gemini"}');
     const agentDetector = new AgentDetector({ locate: catalogLocator({ probe: null }), home, env: {} });
     server = createServer({ port: 0, hostname: "127.0.0.1", stateDir: state, token: "", bridgeToken: BRIDGE_TOKEN, machines: false, sidecar: false, cfAccess: access.cfAccess, tailscaleOwner: null, agentDetector });
   });
@@ -47,6 +49,8 @@ describe("GET /api/agent-catalog", () => {
   it.skipIf(process.platform === "win32")("lists every catalog agent with this platform's commands and what is installed here", async () => {
     writeFileSync(join(bin, "claude"), "#!/bin/sh\necho '2.1.311 (Claude Code)'\n");
     chmodSync(join(bin, "claude"), 0o755);
+    writeFileSync(join(bin, "agy"), "#!/bin/sh\necho '1.5.14'\n");
+    chmodSync(join(bin, "agy"), 0o755);
     process.env["PATH"] = bin;
     const response = await fetch(url("/api/agent-catalog"), { headers: access.headers() });
     expect(response.status).toBe(200);
@@ -58,6 +62,7 @@ describe("GET /api/agent-catalog", () => {
     const claude = body.agents.find((agent) => agent.id === "claude")!;
     expect(claude.install).toEqual(AGENT_CATALOG.find((entry) => entry.id === "claude")!.install[platform]);
     expect(claude.state).toEqual({ installed: true, binary: "claude", on_path: true, version: "2.1.311", version_error: null, meets_min_version: true });
+    expect(body.agents.filter((agent) => Object.hasOwn(agent.state, "auth_mode")).map((agent) => [agent.id, agent.state.auth_mode])).toEqual([["agy", "gemini-api-key"]]);
     expect(body.agents.find((agent) => agent.id === "grok")!.state.installed).toBe(false);
     const muse = body.agents.find((agent) => agent.id === "muse")!;
     expect([muse.install, typeof muse.no_install]).toEqual([null, "string"]);
@@ -106,6 +111,13 @@ describe("GET /api/agent-catalog", () => {
     );
     expect(response.status).toBe(403);
     expect(((await response.json()) as { error: { code: string } }).error.code).toBe("disabled_by_policy");
+  });
+
+  it.each([["", null], ["?providers=devin", "devin"]] as const)("only advertises Devin usage to catalog clients that know it (%s)", async (query, provider) => {
+    const response = await fetch(url(`/api/agent-catalog${query}`), { headers: access.headers() });
+    expect(response.status).toBe(200);
+    const catalog: AgentCatalogResponse = await response.json();
+    expect(catalog.agents.find(({ id }) => id === "devin")?.sign_in?.provider).toBe(provider);
   });
 });
 

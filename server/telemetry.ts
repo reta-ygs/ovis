@@ -1,4 +1,4 @@
-import { emptyUsage, telemetrySurface, type InstallMethod, type TelemetryActive, type TelemetryChange, type TelemetryIngress, type TelemetryRuntime, type TelemetryStatus, type TelemetrySurface } from "../shared/telemetry.ts";
+import { emptyUsage, telemetrySurface, type InstallMethod, type TelemetryActive, type TelemetryAnswerWay, type TelemetryChange, type TelemetryIngress, type TelemetryRuntime, type TelemetryStatus, type TelemetrySurface } from "../shared/telemetry.ts";
 import { jsonResponse } from "./http.ts";
 
 export const TELEMETRY_URL = "";
@@ -10,6 +10,12 @@ type Env = Record<string, string | undefined>;
 
 interface Timer {
   clear(): void;
+}
+
+export interface VisitPane {
+  agent: string | null | undefined;
+  ovis?: boolean;
+  version?: string | null;
 }
 
 export function telemetryBlocked(_env: Env): boolean {
@@ -84,12 +90,18 @@ export class Telemetry {
 
   tally(_counter?: string): void {}
 
+  answering(_paneId: string): (way: Exclude<TelemetryAnswerWay, "terminal"> | null) => void {
+    return () => {};
+  }
+
+  paneStatus(_paneId: string, _status: string): void {}
+
   start(): void {}
 
   stop(): void {}
 
   active(
-    agents: readonly (string | null | undefined)[] | Promise<readonly (string | null | undefined)[]>,
+    agents: readonly VisitPane[] | Promise<readonly VisitPane[]>,
     _visit: { surface?: TelemetrySurface | null; ingress?: TelemetryIngress | null } = {},
   ): Promise<void> {
     Promise.resolve(agents).catch(() => {});

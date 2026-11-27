@@ -336,3 +336,28 @@ it("answers every roster read, the verified one too, without a PC's own agent_re
     expect({ query, marker: text.includes("agent_refs"), hidden: text.includes("SECRET") }).toEqual({ query, marker: false, hidden: false });
   }
 });
+
+it("does not disclose the roster or prove a PC's boot to a request from outside the public origin", async () => {
+  const snapshot = { version: "test", protocol: 22, workspaces: [], tabs: [], layouts: [],
+    panes: [{ pane_id: "pA", terminal_id: "tA", workspace_id: "w1", tab_id: "w1:t1", focused: false, revision: 1, agent_status: "idle" }],
+    agents: [{ pane_id: "pA", agent: "codex", agent_status: "working", tokens: { quota: "SECRET" } }] };
+  const row = (id: string) => ({ id, name: id, kind: id === "local" ? "local" : "ssh", enabled: true, state: "connected", error: null, snapshot }) as unknown as Machine;
+  let proved = 0;
+  const manager = { list: () => [row("local"), row("other-pc")], verifySourceBoot: async () => { proved++; return { boot_id: "R" }; } } as unknown as MachineManager;
+  const herdrSidebar = { get: () => ({ rows: [{ name: "quota", rules: [{ equals: "SECRET", hide: true }] }], by_agent: {} }), subscribe: () => () => {} };
+  const ask = (query: string) => handleMachineRequest(new Request(`http://127.0.0.1/api/machines${query}`, {
+    headers: { origin: "https://another.example" },
+  }), manager, undefined, undefined, false, herdrSidebar, undefined, undefined, undefined, true, "https://ovis.example");
+  for (const query of ["", "?compact_agents=1"]) {
+    const response = await ask(query);
+    const text = await response.text();
+    expect({ query, status: response.status, body: JSON.parse(text), hidden: text.includes("SECRET") }).toMatchObject({
+      query, status: 403, body: { error: { code: "invalid_origin" } }, hidden: false,
+    });
+  }
+  for (const query of ["?verify_source_boot=other-pc", "?verify_source_boot=local"]) {
+    const response = await ask(query);
+    expect({ query, status: response.status, body: await response.json() }).toMatchObject({ query, status: 403, body: { error: { code: "invalid_origin" } } });
+  }
+  expect(proved).toBe(0);
+});
